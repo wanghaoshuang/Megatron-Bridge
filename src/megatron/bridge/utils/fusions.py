@@ -34,26 +34,20 @@ LOG_FUSION_DISABLE = os.environ.get("MEGATRON_SUPPRESS_FUSION_WARNINGS", "0") !=
 def can_enable_gradient_accumulation_fusion() -> bool:
     """Check if gradient accumulation fusion can be enabled.
 
-    There are two independent backends that support wgrad fusion:
-    - TransformerEngine (TE): handles fuse_wgrad_accumulation internally,
-      no extra CUDA extension needed.
-    - APEX fused_weight_gradient_mlp_cuda: required for the non-TE
-      (ColumnParallelLinear) path.
+    MCore's GPTModel.output_layer always uses the standard (non-TE)
+    tensor_parallel.ColumnParallelLinear, which requires the APEX
+    fused_weight_gradient_mlp_cuda extension when
+    gradient_accumulation_fusion=True.
 
-    In TE-based training containers (the common case for high-perf models),
-    fused_weight_gradient_mlp_cuda is not installed, so the APEX check alone
-    incorrectly returns False even though TE can perform the fusion.
+    Although TransformerEngine handles wgrad fusion internally for TE-based
+    transformer layers, it does NOT cover the output_layer path. Therefore,
+    we require fused_weight_gradient_mlp_cuda (APEX) to safely enable this
+    flag across all layers.
 
     Returns:
-        bool: True if gradient accumulation fusion is available via either backend.
+        bool: True only if the APEX fused_weight_gradient_mlp_cuda extension
+              is available.
     """
-    try:
-        import transformer_engine.pytorch  # noqa: F401
-
-        return True
-    except ImportError:
-        pass
-
     try:
         import fused_weight_gradient_mlp_cuda  # noqa: F401
 
@@ -61,9 +55,10 @@ def can_enable_gradient_accumulation_fusion() -> bool:
     except ImportError:
         if LOG_FUSION_DISABLE:
             logger.warning(
-                "gradient_accumulation_fusion requires either TransformerEngine or the "
-                "fused_weight_gradient_mlp_cuda APEX extension, but neither is available. "
-                "Fusion disabled."
+                "gradient_accumulation_fusion requires the fused_weight_gradient_mlp_cuda "
+                "APEX extension (needed by ColumnParallelLinear output_layer), but it is "
+                "not available. Fusion disabled. Install APEX with --cpp_ext and --cuda_ext "
+                "to enable this optimization."
             )
         return False
 
