@@ -32,6 +32,7 @@ Usage::
 import argparse
 import logging
 
+import torch.nn as nn
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
@@ -42,9 +43,33 @@ from megatron.bridge.training.callbacks import Callback, CallbackContext, Callba
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.sparse_distill import SparseDistillForwardStep
+from megatron.bridge.recipes.utils.dataset_utils import DATASET_TYPES, apply_dataset_override
 from megatron.bridge.training.utils.omegaconf_utils import process_config_with_overrides
 
 logger = logging.getLogger(__name__)
+
+
+def _refresh_ddp_pre_hooks(model: nn.Module) -> None:
+    """Re-register DDP forward pre-hooks after submodule replacement.
+
+    swap_to_flashmask replaces core_attention submodules in place on a DDP-wrapped
+    model. DDP's remove_forward_pre_hook_handles still holds handles for the old
+    modules, and the new FlashMaskAttention instances are unknown to it. This causes
+    KeyError in disable_forward_pre_hook when it iterates self.module.modules().
+
+    Fix: remove stale handles, clear the registry, then re-register for all current
+    submodules so DDP's hook state is consistent.
+    """
+    try:
+        from megatron.core.distributed import DistributedDataParallel as CoreDDP
+    except ImportError:
+        return
+    if not isinstance(model, CoreDDP) or not model.use_forward_hook:
+        return
+    for handle in model.remove_forward_pre_hook_handles.values():
+        handle.remove()
+    model.remove_forward_pre_hook_handles.clear()
+    model.enable_forward_pre_hook()
 
 
 class _SparseDistillSetup(Callback):
@@ -60,6 +85,13 @@ class _SparseDistillSetup(Callback):
         # qk_layernorm are preserved.
         for chunk in context.model:
             swap_to_flashmask(chunk)
+            # swap_to_flashmask replaces core_attention submodules after DDP has
+            # already registered forward pre-hooks for the original modules.  The
+            # new FlashMaskAttention instances are absent from DDP's
+            # remove_forward_pre_hook_handles, which causes KeyError when
+            # disable_forward_pre_hook iterates self.module.modules().
+            # Refresh DDP hook registration to include the swapped-in modules.
+            _refresh_ddp_pre_hooks(chunk)
             self.forward_step.student_collector.attach(chunk)
 
         # Teacher: a fresh GPTModel with the same provider but standard attention.
@@ -72,6 +104,7 @@ class _SparseDistillSetup(Callback):
         provider.expert_model_parallel_size = cfg.expert_model_parallel_size
         provider.sequence_parallel = cfg.sequence_parallel
         provider.seq_length = cfg.seq_length
+        provider.finalize()
 
         teacher = provider.provide_distributed_model(wrap_with_ddp=False, mixed_precision_wrapper=None)
         for tm in teacher:
@@ -87,6 +120,7 @@ def parse_args():
     p.add_argument("--hf_path", type=str, default="Qwen/Qwen3-30B-A3B")
     p.add_argument("--alpha", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--dataset", type=str, default=None, choices=DATASET_TYPES)
     args, cli_overrides = p.parse_known_args()
     return args, cli_overrides
 
@@ -106,6 +140,9 @@ def main():
     cfg.model.sequence_parallel = True
 
     cfg = process_config_with_overrides(config=cfg, cli_overrides=cli_overrides or None)
+
+    if args.dataset is not None:
+        cfg = apply_dataset_override(cfg, dataset_type=args.dataset, cli_overrides=cli_overrides)
 
     student_collector = AttnOutputCollector()
     teacher_collector = AttnOutputCollector()
