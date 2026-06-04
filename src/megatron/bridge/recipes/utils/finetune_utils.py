@@ -17,6 +17,7 @@
 from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.data.hf_processors.gsm8k import process_gsm8k_example
+from megatron.bridge.data.hf_processors.longalpaca import process_longalpaca_example
 from megatron.bridge.data.hf_processors.openmathinstruct2 import process_openmathinstruct2_example
 from megatron.bridge.data.hf_processors.squad import process_squad_example
 from megatron.bridge.peft.base import PEFT
@@ -129,6 +130,48 @@ def default_openmathinstruct2_config(
         persistent_workers=False,
         packed_sequence_specs=packed_sequence_specs,
         rewrite=False,  # Rewrite existing processed files
+    )
+
+
+def default_longalpaca_config(
+    seq_length: int = 4096,
+    packed_sequence: bool = False,
+    pad_seq_to_mult: int = 1,
+) -> HFDatasetConfig:
+    """Create default LongAlpaca-12k dataset configuration for finetuning recipes.
+
+    LongAlpaca-12k is a long-context instruction-following dataset with ~12k examples
+    in the standard Alpaca format (instruction / input / output).
+    See: https://huggingface.co/datasets/Yukang/LongAlpaca-12k
+
+    Args:
+        seq_length: Sequence length for the dataset (default 4096 for long-context)
+        packed_sequence: Whether to enable packed sequences for training efficiency
+        pad_seq_to_mult: Optional multiple to pad each sequence to when packing
+
+    Returns:
+        HFDatasetConfig configured for LongAlpaca-12k finetuning
+    """
+    packed_sequence_specs = None
+    if packed_sequence:
+        packed_sequence_specs = PackedSequenceSpecs(packed_sequence_size=seq_length, pad_seq_to_mult=pad_seq_to_mult)
+
+    return HFDatasetConfig(
+        dataset_name="Yukang/LongAlpaca-12k",
+        process_example_fn=process_longalpaca_example,
+        seq_length=seq_length,
+        seed=5678,
+        memmap_workers=1,
+        dataloader_type="batch",
+        do_validation=True,
+        do_test=False,
+        val_proportion=0.05,
+        num_workers=2,
+        data_sharding=True,
+        pin_memory=True,
+        persistent_workers=False,
+        packed_sequence_specs=packed_sequence_specs,
+        rewrite=False,
     )
 
 

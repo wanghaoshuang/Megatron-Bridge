@@ -23,6 +23,7 @@ from megatron.bridge.data.vlm_datasets.hf_provider import HFDatasetConversationP
 from megatron.bridge.data.vlm_datasets.preloaded_provider import PreloadedVLMConversationProvider
 from megatron.bridge.recipes.utils.finetune_utils import (
     default_gsm8k_config,
+    default_longalpaca_config,
     default_openmathinstruct2_config,
     default_squad_config,
 )
@@ -123,6 +124,7 @@ LLM_FINETUNE_PRESETS: dict[str, Callable] = {
     "squad": default_squad_config,
     "openmathinstruct2": default_openmathinstruct2_config,
     "gsm8k": default_gsm8k_config,
+    "longalpaca": default_longalpaca_config,
 }
 
 
