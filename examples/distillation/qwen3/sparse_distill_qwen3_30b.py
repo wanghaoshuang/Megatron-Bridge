@@ -38,6 +38,7 @@ from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
     swap_to_flashmask,
 )
+from megatron.bridge.models.qwen.memory_token import register_memory_token_injector
 from megatron.bridge.recipes.qwen.qwen3_moe import qwen3_30b_a3b_sft_config
 from megatron.bridge.training.callbacks import Callback, CallbackContext, CallbackManager
 from megatron.bridge.training.config import ConfigContainer
@@ -121,6 +122,18 @@ def parse_args():
     p.add_argument("--alpha", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--dataset", type=str, default=None, choices=DATASET_TYPES)
+    p.add_argument(
+        "--group_size",
+        type=int,
+        default=0,
+        help="Memory-token group size g. 0 disables memory-token augmentation.",
+    )
+    p.add_argument(
+        "--pad_token_id",
+        type=int,
+        default=0,
+        help="Token id used as a placeholder for memory slots in student input.",
+    )
     args, cli_overrides = p.parse_known_args()
     return args, cli_overrides
 
@@ -152,7 +165,25 @@ def main():
         teacher_collector=teacher_collector,
         alpha=args.alpha,
         temperature=args.temperature,
+        group_size=args.group_size,
+        pad_token_id=args.pad_token_id,
     )
+
+    # Register memory-token injector before DDP wraps the student. The pre-wrap
+    # hook receives the list of (un-wrapped) GPTModel chunks; we attach the
+    # injector as a real submodule so DDP picks up its parameters.
+    if args.group_size > 0:
+        group_size = args.group_size
+
+        def _attach_injector(models):
+            for m in models:
+                # Only the first PP stage owns the embedding.
+                if getattr(m, "embedding", None) is None:
+                    continue
+                register_memory_token_injector(m, group_size=group_size)
+            return models
+
+        cfg.model.register_pre_wrap_hook(_attach_injector)
 
     cb = _SparseDistillSetup(hf_path=args.hf_path, forward_step=forward_step)
     cm = CallbackManager()

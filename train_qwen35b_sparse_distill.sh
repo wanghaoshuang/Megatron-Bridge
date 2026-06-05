@@ -13,6 +13,13 @@ mkdir -p ${LOG_DIR}
 LOG_FILE="${LOG_DIR}/train_qwen35b_sparse_distill.log"
 rm -f "${LOG_FILE}"
 
+TB_BASE="${workspace}/Megatron-Bridge/nemo_experiments/default/tb_logs/memory_token"
+mkdir -p ${TB_BASE}
+id=0
+while [ -d "${TB_BASE}/exp_${id}" ]; do id=$((id+1)); done
+TB_LOG_DIR="${TB_BASE}/exp_${id}"
+mkdir -p ${TB_LOG_DIR}
+
 python -m torch.distributed.run --nproc_per_node=8 \
   examples/distillation/qwen3/sparse_distill_qwen3_30b.py \
   --hf_path ${MODEL_PATH} \
@@ -20,6 +27,8 @@ python -m torch.distributed.run --nproc_per_node=8 \
   dataset.dataset_name=longalpaca \
   --alpha 1.0 \
   --temperature 1.0 \
+  --group_size 16 \
+  --pad_token_id 0 \
   model.tensor_model_parallel_size=2 \
   model.pipeline_model_parallel_size=1 \
   model.expert_model_parallel_size=4 \
@@ -28,4 +37,5 @@ python -m torch.distributed.run --nproc_per_node=8 \
   train.train_iters=100 \
   validation.eval_iters=2 \
   checkpoint.save=null \
+  logging.tensorboard_dir=${TB_LOG_DIR} \
   2>&1 | tee ${LOG_FILE}
