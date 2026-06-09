@@ -23,6 +23,7 @@ Used by the SparseAttention distillation training pipeline to:
 """
 
 from typing import Iterable, List
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -43,13 +44,22 @@ def _iter_decoder_layers(model: nn.Module) -> Iterable[nn.Module]:
         yield layer
 
 
-def swap_to_flashmask(model: nn.Module) -> nn.Module:
+def swap_to_flashmask(
+    model: nn.Module,
+    *,
+    group_size: Optional[int] = None,
+    segment_size: Optional[int] = None,
+) -> nn.Module:
     """Replace ``self_attention.core_attention`` of every decoder layer with
     :class:`FlashMaskAttention`.
 
     The replacement preserves ``linear_qkv``, ``linear_proj``, ``q_layernorm``,
     ``k_layernorm`` and the rest of the SelfAttention module, so the existing
     pretrained weights remain valid.
+
+    If ``group_size`` and ``segment_size`` are provided, the swapped
+    attention uses the interleaved (token + memory) sparse mask defined in
+    ``experiments/sparse_attention/sparse_mask.py``.
     """
     for layer in _iter_decoder_layers(model):
         self_attn = getattr(layer, "self_attention", None)
@@ -61,6 +71,8 @@ def swap_to_flashmask(model: nn.Module) -> nn.Module:
             layer_number=getattr(self_attn, "layer_number", 1),
             attn_mask_type=getattr(old, "attn_mask_type", None),
             attention_type=getattr(old, "attention_type", "self"),
+            group_size=group_size,
+            segment_size=segment_size,
         ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
         self_attn.core_attention = new
     return model

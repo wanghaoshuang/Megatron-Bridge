@@ -41,12 +41,91 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import divide
 
 
+_SPARSE_MASK_CACHE: dict = {}
+
+
+def _build_sparse_memory_pattern(
+    seq_len: int,
+    group_size: int,
+    segment_size: int,
+    device: torch.device,
+) -> Tensor:
+    """Build the interleaved (token + memory) sparse mask of shape ``[seq_len, seq_len]``.
+
+    The expanded sequence has K = seq_len // (group_size + 1) memory tokens
+    inserted at positions ``k*(g+1) + g``. ``segment_size`` is in *original*
+    (un-expanded) token units and must satisfy ``segment_size % group_size == 0``.
+
+    Mirrors ``experiments/sparse_attention/sparse_mask.py::_attend``.
+    """
+    g = group_size
+    s = segment_size
+    if g < 1:
+        raise ValueError(f"group_size must be >= 1, got {g}")
+    if s % g != 0:
+        raise ValueError(f"segment_size ({s}) must be divisible by group_size ({g})")
+
+    cache_key = (seq_len, g, s, device)
+    cached = _SPARSE_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    K = seq_len // (g + 1)
+    pos = torch.arange(seq_len, device=device)
+
+    # is_mem[p] == True iff position p is a memory token slot.
+    in_head = pos < K * (g + 1)
+    is_mem = in_head & ((pos % (g + 1)) == g)
+
+    # Original-token global index i for non-memory positions.
+    # head: i = (p // (g+1)) * g + (p % (g+1))
+    # tail: i = p - K
+    i_idx = torch.where(
+        in_head,
+        (pos // (g + 1)) * g + (pos % (g + 1)),
+        pos - K,
+    )
+    # Memory global index j for memory positions: j = p // (g+1).
+    j_idx = pos // (g + 1)
+
+    # Pairwise broadcast: rows = query, cols = key.
+    qm = is_mem[:, None]
+    km = is_mem[None, :]
+    qi = i_idx[:, None]
+    ki = i_idx[None, :]
+    qj = j_idx[:, None]
+    kj = j_idx[None, :]
+
+    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+
+    # (1) t -> t : same segment, causal.
+    tt = (~qm) & (~km)
+    mask |= tt & (qi // s == ki // s) & (ki <= qi)
+
+    # (2) t -> m : strictly earlier segment.
+    # tm = (~qm) & km
+    # mask |= tm & ((kj * g) // s < qi // s)
+
+    # (3) m -> t : same segment, within own group.
+    mt = qm & (~km)
+    mask |= mt & ((qj * g) // s == ki // s) & (ki < (qj + 1) * g)
+
+    # (4) m -> m : causal.
+    mm = qm & km
+    mask |= mm & (kj < qj)
+
+    _SPARSE_MASK_CACHE[cache_key] = mask
+    return mask
+
+
 def build_flash_mask(
     seq_len_q: int,
     seq_len_k: int,
     device: torch.device,
     causal: bool = True,
     sparse_pattern: Optional[Tensor] = None,
+    group_size: Optional[int] = None,
+    segment_size: Optional[int] = None,
 ) -> Tensor:
     """Build a bool attention mask of shape ``[s_q, s_k]``.
 
@@ -59,13 +138,25 @@ def build_flash_mask(
         device:    target device.
         causal:    enable causal (lower-triangular) mask.
         sparse_pattern: optional extra bool mask of shape ``[s_q, s_k]`` that
-            will be AND-ed with the causal mask. Hook for future column-wise /
-            block-sparse patterns. Currently unused.
+            will be AND-ed with the (causal/sparse) mask.
+        group_size: if set together with ``segment_size``, use the interleaved
+            (token + memory) sparse mask defined in
+            ``experiments/sparse_attention/sparse_mask.py`` instead of a plain
+            causal mask. Requires ``seq_len_q == seq_len_k``.
+        segment_size: number of *original* tokens per segment (``s`` in the
+            reference). Must be divisible by ``group_size``.
 
     Returns:
         Bool tensor of shape ``[s_q, s_k]``.
     """
-    if causal:
+    if group_size is not None and segment_size is not None:
+        if seq_len_q != seq_len_k:
+            raise ValueError(
+                "Sparse memory mask requires seq_len_q == seq_len_k, "
+                f"got {seq_len_q} vs {seq_len_k}"
+            )
+        mask = _build_sparse_memory_pattern(seq_len_q, group_size, segment_size, device)
+    elif causal:
         mask = torch.ones(seq_len_q, seq_len_k, device=device, dtype=torch.bool).tril_()
     else:
         mask = torch.ones(seq_len_q, seq_len_k, device=device, dtype=torch.bool)
@@ -92,6 +183,8 @@ class FlashMaskAttention(MegatronModule):
         softmax_scale: Optional[float] = None,
         cp_comm_type: Optional[str] = None,
         pg_collection=None,
+        group_size: Optional[int] = None,
+        segment_size: Optional[int] = None,
     ):
         super().__init__(config=config)
         self.config = config
@@ -123,6 +216,8 @@ class FlashMaskAttention(MegatronModule):
             attention_dropout if attention_dropout is not None else config.attention_dropout
         )
         self.softmax_scale = softmax_scale  # if None, SDPA uses 1/sqrt(d_k)
+        self.group_size = group_size
+        self.segment_size = segment_size
 
     def forward(
         self,
@@ -156,7 +251,14 @@ class FlashMaskAttention(MegatronModule):
         v_ = value.permute(1, 2, 0, 3).contiguous()
 
         causal = self.attn_mask_type == AttnMaskType.causal or attn_mask_type == AttnMaskType.causal
-        mask = build_flash_mask(sq, sk, device=query.device, causal=causal, sparse_pattern=None)
+        mask = build_flash_mask(
+            sq, sk,
+            device=query.device,
+            causal=causal,
+            sparse_pattern=None,
+            group_size=self.group_size,
+            segment_size=self.segment_size,
+        )
         # broadcastable to [b, np, sq, sk]
         attn_mask = mask.unsqueeze(0).unsqueeze(0)
 

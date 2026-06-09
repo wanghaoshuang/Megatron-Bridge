@@ -41,7 +41,7 @@ from megatron.bridge.models.qwen.qwen3_swap_attention import (
 from megatron.bridge.models.qwen.memory_token import register_memory_token_injector
 from megatron.bridge.recipes.qwen.qwen3_moe import qwen3_30b_a3b_sft_config
 from megatron.bridge.training.callbacks import Callback, CallbackContext, CallbackManager
-from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.config import ConfigContainer, FinetuningDatasetConfig
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.sparse_distill import SparseDistillForwardStep
 from megatron.bridge.recipes.utils.dataset_utils import DATASET_TYPES, apply_dataset_override
@@ -77,15 +77,26 @@ class _SparseDistillSetup(Callback):
     """Hooks called at training start to: (1) swap student attention to
     FlashMaskAttention, (2) build the teacher model, (3) attach hooks for both."""
 
-    def __init__(self, hf_path: str, forward_step: SparseDistillForwardStep) -> None:
+    def __init__(
+        self,
+        hf_path: str,
+        forward_step: SparseDistillForwardStep,
+        group_size: int = 0,
+        segment_size: int = 0,
+    ) -> None:
         self.hf_path = hf_path
         self.forward_step = forward_step
+        self.group_size = group_size
+        self.segment_size = segment_size
 
     def on_train_start(self, context: CallbackContext) -> None:
         # Student: swap attention in place. Weights of linear_qkv / linear_proj /
         # qk_layernorm are preserved.
+        sparse_kwargs = {}
+        if self.group_size > 0 and self.segment_size > 0:
+            sparse_kwargs = {"group_size": self.group_size, "segment_size": self.segment_size}
         for chunk in context.model:
-            swap_to_flashmask(chunk)
+            swap_to_flashmask(chunk, **sparse_kwargs)
             # swap_to_flashmask replaces core_attention submodules after DDP has
             # already registered forward pre-hooks for the original modules.  The
             # new FlashMaskAttention instances are absent from DDP's
@@ -119,6 +130,14 @@ class _SparseDistillSetup(Callback):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--hf_path", type=str, default="Qwen/Qwen3-30B-A3B")
+    p.add_argument("--config_file", type=str, default=None, help="Path to YAML config file.")
+    p.add_argument(
+        "--data_path",
+        "--data-path",
+        type=str,
+        default=None,
+        help="Path to a JSONL pretraining-style dataset file or a directory containing training.jsonl.",
+    )
     p.add_argument("--alpha", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--dataset", type=str, default=None, choices=DATASET_TYPES)
@@ -129,12 +148,27 @@ def parse_args():
         help="Memory-token group size g. 0 disables memory-token augmentation.",
     )
     p.add_argument(
+        "--segment_size",
+        type=int,
+        default=0,
+        help="Sparse-mask segment size s (in original tokens). Must be a multiple "
+             "of --group_size. 0 disables the interleaved sparse mask (causal only).",
+    )
+    p.add_argument(
         "--pad_token_id",
         type=int,
         default=0,
         help="Token id used as a placeholder for memory slots in student input.",
     )
     args, cli_overrides = p.parse_known_args()
+    if args.segment_size > 0:
+        if args.group_size <= 0:
+            raise ValueError("--segment_size requires --group_size > 0")
+        if args.segment_size % args.group_size != 0:
+            raise ValueError(
+                f"--segment_size ({args.segment_size}) must be divisible by "
+                f"--group_size ({args.group_size})"
+            )
     return args, cli_overrides
 
 
@@ -152,10 +186,19 @@ def main():
     cfg.model.expert_model_parallel_size = 4
     cfg.model.sequence_parallel = True
 
-    cfg = process_config_with_overrides(config=cfg, cli_overrides=cli_overrides or None)
+    # Replace default SQuAD dataset with FinetuningDatasetConfig so YAML can
+    # set dataset_root and all other pretrain-style dataset fields.
+    cfg.dataset = FinetuningDatasetConfig(seq_length=cfg.model.seq_length)
+
+    cfg = process_config_with_overrides(config=cfg, config_filepath=args.config_file, cli_overrides=cli_overrides or None)
 
     if args.dataset is not None:
         cfg = apply_dataset_override(cfg, dataset_type=args.dataset, cli_overrides=cli_overrides)
+
+    if args.data_path is not None:
+        from pathlib import Path
+        path = Path(args.data_path)
+        cfg.dataset.dataset_root = path.parent if path.suffix == ".jsonl" else path
 
     student_collector = AttnOutputCollector()
     teacher_collector = AttnOutputCollector()
@@ -185,7 +228,12 @@ def main():
 
         cfg.model.register_pre_wrap_hook(_attach_injector)
 
-    cb = _SparseDistillSetup(hf_path=args.hf_path, forward_step=forward_step)
+    cb = _SparseDistillSetup(
+        hf_path=args.hf_path,
+        forward_step=forward_step,
+        group_size=args.group_size,
+        segment_size=args.segment_size,
+    )
     cm = CallbackManager()
     cm.add(cb)
 

@@ -1,0 +1,41 @@
+model:
+  tensor_model_parallel_size: 2
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  sequence_parallel: true
+  seq_length: 8000
+
+train:
+  train_iters: 100
+  micro_batch_size: 1
+  global_batch_size: 32
+
+logger:
+  log_interval: 1
+
+validation:
+  eval_iters: 2
+
+checkpoint:
+  save: null
+
+dataset:
+  dataset_root: "/root/paddlejob/amfp-inference-public/wanghaoshuang/data/megatron_sft_fixed"
+  seq_length: 8000
+  dataloader_type: "cyclic"
+  memmap_workers: 32
+  do_validation: false
+  do_test: false
+  seed: 5678
+  dataset_kwargs: {
+    "chat": False,
+    "use_hf_tokenizer_chat_template": False,
+    "add_bos": True,
+    "pad_to_max_length": False,
+    "answer_only_loss": False,
+    "truncation_field": "input"
+  }
+
+tokenizer:
+  hf_tokenizer_kwargs:
+    eos_token: "<|im_end|>"
