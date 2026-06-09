@@ -103,6 +103,7 @@ def _build_sparse_memory_pattern(
     mask |= tt & (qi // s == ki // s) & (ki <= qi)
 
     # (2) t -> m : strictly earlier segment.
+    # debuggggggg
     # tm = (~qm) & km
     # mask |= tm & ((kj * g) // s < qi // s)
 

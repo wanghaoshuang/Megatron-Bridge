@@ -76,6 +76,9 @@ class TokenizerConfig:
     image_tag_type: Optional[str] = None
     force_system_message: Optional[bool] = False
 
+    eos_token: Optional[str] = None
+    """EOS token string to pass to the HuggingFace tokenizer (overrides the model default)."""
+
     hf_tokenizer_kwargs: dict[str, Any] | None = field(default_factory=dict)
     """Additional keyword arguments to pass to HuggingFace AutoTokenizer.from_pretrained.
 

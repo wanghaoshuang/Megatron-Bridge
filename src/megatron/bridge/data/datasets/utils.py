@@ -1340,7 +1340,21 @@ def _tokenize(tokenizer, text):
     """
     if getattr(tokenizer, "legacy", False):
         # legacy tokenizer system
-        return tokenizer.text_to_ids(text)
+        ids = tokenizer.text_to_ids(text)
     else:
         # new tokenizer system
-        return tokenizer.tokenize(text)
+        ids = tokenizer.tokenize(text)
+    if ids and any(x is None for x in ids):
+        import logging
+        _none_pos = [i for i, x in enumerate(ids) if x is None]
+        # Try to get token strings to identify which tokens have no id
+        try:
+            tokens = tokenizer._tokenizer.text_to_tokens(text)
+            _none_tokens = [tokens[i] for i in _none_pos if i < len(tokens)]
+        except Exception:
+            _none_tokens = "unavailable"
+        logging.warning(
+            f"[_tokenize] None id(s) at positions {_none_pos}, "
+            f"token strings={_none_tokens}, text={text!r}"
+        )
+    return ids

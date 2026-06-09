@@ -640,14 +640,13 @@ class GPTSFTDataset(Dataset):
                     raise e
 
         template_strings, template_strings_keys = self._separate_template(prompt_template_values)
-        template_ids = [_tokenize(self.tokenizer, s) for s in template_strings]
+        template_ids = [_tokenize(self.tokenizer, s) if s else [] for s in template_strings]
         context_ids, answer_ids = self._multiple_truncation(template_ids, template_strings_keys)
 
         if self.virtual_tokens:
             # (@adithyare) we are going to insert "pad/eos" tokens in the beginning of the text and context
             # these pad/eos tokens are placeholders for virtual tokens
             context_ids = [self.tokenizer.eos_id] * self.virtual_tokens + context_ids
-
         # Adds bos token in the start
         if self.add_bos:
             context_ids = [self.tokenizer.bos_id] + context_ids

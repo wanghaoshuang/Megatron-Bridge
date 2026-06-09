@@ -186,6 +186,9 @@ def main():
     cfg.model.expert_model_parallel_size = 4
     cfg.model.sequence_parallel = True
 
+    # Ensure eos_token is set for HuggingFaceTokenizer so tokenizer.eos_id is non-None.
+    cfg.tokenizer.eos_token = "<|im_end|>"
+
     # Replace default SQuAD dataset with FinetuningDatasetConfig so YAML can
     # set dataset_root and all other pretrain-style dataset fields.
     cfg.dataset = FinetuningDatasetConfig(seq_length=cfg.model.seq_length)

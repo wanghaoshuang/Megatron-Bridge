@@ -62,6 +62,8 @@ def build_tokenizer(config: TokenizerConfig, **kwargs) -> MegatronTokenizer:
         kwargs["vocab_file"] = config.vocab_file
         kwargs["merges_file"] = config.merge_file
         kwargs["additional_special_tokens"] = config.special_tokens if config.special_tokens else []
+        if config.eos_token is not None:
+            kwargs["eos_token"] = config.eos_token
         if config.hf_tokenizer_kwargs:
             kwargs.update(config.hf_tokenizer_kwargs)
     elif config.tokenizer_type == "MultimodalTokenizer":
