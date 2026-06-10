@@ -98,14 +98,16 @@ def _build_sparse_memory_pattern(
 
     mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
 
-    # (1) t -> t : same segment, causal.
+    # (1) t -> t : sliding window.
     tt = (~qm) & (~km)
-    mask |= tt & (qi // s == ki // s) & (ki <= qi)
+    # mask |= tt & (qi // s == ki // s) & (ki <= qi)
+    # int(qi - (s - 1) <= ki <= qi) sliding window: attend to previous s-1 tokens
+    mask |= tt & (qi - (s - 1) <= ki) & (ki <= qi)
 
-    # (2) t -> m : strictly earlier segment.
+    # (2) t -> m :  仅关注 sliding window 之前的 memory token
     # debuggggggg
-    # tm = (~qm) & km
-    # mask |= tm & ((kj * g) // s < qi // s)
+    tm = (~qm) & km
+    mask |= tm & ((ki + 1) * g <= qi - (s - 1))
 
     # (3) m -> t : same segment, within own group.
     mt = qm & (~km)

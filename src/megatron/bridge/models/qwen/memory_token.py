@@ -62,8 +62,14 @@ class MemoryTokenInjector(nn.Module):
             raise ValueError(f"group_size must be >= 2, got {group_size}")
         self.hidden_size = hidden_size
         self.group_size = group_size
-        # Single trainable linear layer m_k = mean(W * x_{k*g .. k*g+g-1}) + b
-        self.mlp = nn.Linear(hidden_size, hidden_size)
+        # SwiGLU FFN matching Qwen3-30B-A3B expert FFN shape (moe_intermediate_size=768)
+        moe_intermediate_size = 768
+        self.gate_proj = nn.Linear(hidden_size, moe_intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, moe_intermediate_size, bias=False)
+        self.down_proj = nn.Linear(moe_intermediate_size, hidden_size, bias=False)
+        nn.init.kaiming_normal_(self.gate_proj.weight)
+        nn.init.kaiming_normal_(self.up_proj.weight)
+        nn.init.kaiming_normal_(self.down_proj.weight)
 
     def forward(self, embed_out: torch.Tensor) -> torch.Tensor:
         """Args:
@@ -95,9 +101,10 @@ class MemoryTokenInjector(nn.Module):
         head = head.view(K, g + 1, b, h)
         real = head[:, :g, :, :]                         # [K, g, b, h]
 
-        # m_k = mean over group of MLP(real_tokens)
+        # m_k = mean over group of FFN(real_tokens) using SwiGLU
         flat = real.reshape(K * g, b, h)
-        mlp_out = self.mlp(flat).view(K, g, b, h)
+        ffn_out = self.down_proj(nn.functional.silu(self.gate_proj(flat)) * self.up_proj(flat))
+        ffn_out = ffn_out.view(K, g, b, h)
         memory = mlp_out.mean(dim=1, keepdim=True)       # [K, 1, b, h]
 
         # Replace memory slot (index g) with the computed memory vectors.
