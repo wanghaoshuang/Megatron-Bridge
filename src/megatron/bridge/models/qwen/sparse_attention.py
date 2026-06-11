@@ -44,82 +44,81 @@ from megatron.core.utils import divide
 _SPARSE_MASK_CACHE: dict = {}
 
 
-def _build_sparse_memory_pattern(
+
+def _build_sparse_prepend_memory_pattern(
     seq_len: int,
     group_size: int,
     segment_size: int,
     device: torch.device,
 ) -> Tensor:
-    """Build the interleaved (token + memory) sparse mask of shape ``[seq_len, seq_len]``.
+    """Build the sparse attention mask in *prepend-memory* layout.
 
-    The expanded sequence has K = seq_len // (group_size + 1) memory tokens
-    inserted at positions ``k*(g+1) + g``. ``segment_size`` is in *original*
-    (un-expanded) token units and must satisfy ``segment_size % group_size == 0``.
+    ``seq_len`` is the number of **original** (non-memory) tokens.  The total
+    mask dimension is ``seq_len + seq_len // group_size`` because one memory
+    token is inserted after every ``group_size`` original tokens.
 
-    Mirrors ``experiments/sparse_attention/sparse_mask.py::_attend``.
+    The mask matrix rows/columns are ordered as::
+
+        [m_0, m_1, ..., m_{J-1}, t_0, t_1, ..., t_{I-1}]
+
+    where ``I = seq_len`` and ``J = seq_len // group_size``.  This matches the
+    ``sparse_mask_v2.py::build_sparse_mask`` permutation.
+
+    Mask rules (from ``sparse_mask_v2.py::_attend``):
+
+    ① t -> t  :  sliding window   qi - (s-1) <= ki <= qi
+    ② t -> m  :  only memory before the window   (ki+1)*g <= qi - (s-1)
+    ③ m -> t  :  same segment & before group end   seg_m(qi)==seg_t(ki) and ki < (qi+1)*g
+    ④ m -> m  :  causal   ki < qi
+
+    Args:
+        seq_len:     number of **original** tokens (excluding memory tokens).
+        group_size:  ``g`` — tokens per compression group.
+        segment_size: ``s`` — regular tokens per segment.  Must divide by ``group_size``.
+        device:      target torch device.
+
+    Returns:
+        Bool tensor of shape ``[I+J, I+J]`` where ``True`` means *attend*.
     """
-    g = group_size
     s = segment_size
-    if g < 1:
-        raise ValueError(f"group_size must be >= 1, got {g}")
-    if s % g != 0:
-        raise ValueError(f"segment_size ({s}) must be divisible by group_size ({g})")
+    g = group_size
+    assert s % g == 0, f"segment_size ({s}) must be divisible by group_size ({g})"
+    assert seq_len % g == 0, f"seq_len ({seq_len}) must be divisible by group_size ({g})"
 
-    cache_key = (seq_len, g, s, device)
-    cached = _SPARSE_MASK_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    I = seq_len                       # number of regular (original) tokens
+    J = seq_len // g                  # number of memory tokens
+    total_len = I + J
 
-    K = seq_len // (g + 1)
-    pos = torch.arange(seq_len, device=device)
+    mask = torch.zeros(total_len, total_len, dtype=torch.bool, device=device)
 
-    # is_mem[p] == True iff position p is a memory token slot.
-    in_head = pos < K * (g + 1)
-    is_mem = in_head & ((pos % (g + 1)) == g)
+    # Index grids -------------------------------------------------------
+    # Memory block: rows [0, J), cols [0, J)
+    qi_m = torch.arange(J, device=device).unsqueeze(1)  # [J, 1]
+    kj_m = torch.arange(J, device=device).unsqueeze(0)  # [1, J]
 
-    # Original-token global index i for non-memory positions.
-    # head: i = (p // (g+1)) * g + (p % (g+1))
-    # tail: i = p - K
-    i_idx = torch.where(
-        in_head,
-        (pos // (g + 1)) * g + (pos % (g + 1)),
-        pos - K,
-    )
-    # Memory global index j for memory positions: j = p // (g+1).
-    j_idx = pos // (g + 1)
+    # Regular-token block: rows [J, total_len), cols [J, total_len)
+    qi_t = torch.arange(I, device=device).unsqueeze(1)  # [I, 1]
+    ki_t = torch.arange(I, device=device).unsqueeze(0)  # [1, I]
 
-    # Pairwise broadcast: rows = query, cols = key.
-    qm = is_mem[:, None]
-    km = is_mem[None, :]
-    qi = i_idx[:, None]
-    ki = i_idx[None, :]
-    qj = j_idx[:, None]
-    kj = j_idx[None, :]
+    # Cross blocks
+    ki_t_for_mq = torch.arange(I, device=device).unsqueeze(0)  # [1, I]  (m row, t col)
+    kj_m_for_tq = torch.arange(J, device=device).unsqueeze(0)  # [1, J]  (t row, m col)
 
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+    # ④ m -> m : causal  (ki < qi)
+    mask[:J, :J] = kj_m < qi_m
 
-    # (1) t -> t : sliding window.
-    tt = (~qm) & (~km)
-    # mask |= tt & (qi // s == ki // s) & (ki <= qi)
-    # int(qi - (s - 1) <= ki <= qi) sliding window: attend to previous s-1 tokens
-    mask |= tt & (qi - (s - 1) <= ki) & (ki <= qi)
+    # ③ m -> t : same segment & ki < (qi+1)*g
+    seg_m = (qi_m * g) // s       # segment of memory query
+    seg_t_col = ki_t_for_mq // s  # segment of token key
+    mask[:J, J:] = (seg_m == seg_t_col) & (ki_t_for_mq < (qi_m + 1) * g)
 
-    # (2) t -> m :  仅关注 sliding window 之前的 memory token
-    # debuggggggg
-    tm = (~qm) & km
-    mask |= tm & ((ki + 1) * g <= qi - (s - 1))
+    # ② t -> m : (ki+1)*g <= qi - (s-1)
+    mask[J:, :J] = (kj_m_for_tq + 1) * g <= qi_t - (s - 1)
 
-    # (3) m -> t : same segment, within own group.
-    mt = qm & (~km)
-    mask |= mt & ((qj * g) // s == ki // s) & (ki < (qj + 1) * g)
+    # ① t -> t : sliding window  qi - (s-1) <= ki <= qi
+    mask[J:, J:] = (qi_t - (s - 1) <= ki_t) & (ki_t <= qi_t)
 
-    # (4) m -> m : causal.
-    mm = qm & km
-    mask |= mm & (kj < qj)
-
-    _SPARSE_MASK_CACHE[cache_key] = mask
     return mask
-
 
 def build_flash_mask(
     seq_len_q: int,
@@ -158,7 +157,10 @@ def build_flash_mask(
                 "Sparse memory mask requires seq_len_q == seq_len_k, "
                 f"got {seq_len_q} vs {seq_len_k}"
             )
-        mask = _build_sparse_memory_pattern(seq_len_q, group_size, segment_size, device)
+        # seq_len_q here is the *expanded* sequence length (including memory tokens).
+        # _build_sparse_prepend_memory_pattern expects the *original* token count.
+        original_seq_len = seq_len_q * group_size // (group_size + 1)
+        mask = _build_sparse_prepend_memory_pattern(original_seq_len, group_size, segment_size, device)
     elif causal:
         mask = torch.ones(seq_len_q, seq_len_k, device=device, dtype=torch.bool).tril_()
     else:

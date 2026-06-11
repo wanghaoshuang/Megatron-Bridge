@@ -38,7 +38,7 @@ from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
     swap_to_flashmask,
 )
-from megatron.bridge.models.qwen.memory_token import register_memory_token_injector
+from megatron.bridge.models.qwen.memory_token import register_prepend_memory_token_injector
 from megatron.bridge.recipes.qwen.qwen3_moe import qwen3_30b_a3b_sft_config
 from megatron.bridge.training.callbacks import Callback, CallbackContext, CallbackManager
 from megatron.bridge.training.config import ConfigContainer, FinetuningDatasetConfig
@@ -226,7 +226,7 @@ def main():
                 # Only the first PP stage owns the embedding.
                 if getattr(m, "embedding", None) is None:
                     continue
-                register_memory_token_injector(m, group_size=group_size)
+                register_prepend_memory_token_injector(m, group_size=group_size)
             return models
 
         cfg.model.register_pre_wrap_hook(_attach_injector)

@@ -45,8 +45,9 @@ from megatron.bridge.training.state import GlobalState
 
 from megatron.bridge.models.qwen.qwen3_swap_attention import AttnOutputCollector
 from megatron.bridge.models.qwen.memory_token import (
-    collapse_to_original_positions,
+    collapse_prepend_to_original_positions,
     expand_batch_for_memory_tokens,
+    prepend_batch_for_memory_tokens,
 )
 
 
@@ -127,9 +128,9 @@ def _sparse_distill_loss(
         # core_attention outputs are full-sequence tensors [s', b, h/tp] — they are
         # NOT sequence-parallel-scattered (the SP scatter happens at linear_proj's
         # reduce-scatter, which comes *after* core_attention). Gathering here would
-        # double the sequence length and break collapse_to_original_positions.
+        # double the sequence length and break collapse_prepend_to_original_positions.
         collapsed = [
-            collapse_to_original_positions(s_o, group_size, original_seq_len)
+            collapse_prepend_to_original_positions(s_o, group_size, original_seq_len)
             for s_o in student_outs
         ]
         student_outs = collapsed
@@ -242,7 +243,7 @@ class SparseDistillForwardStep:
         tokens = batch.get("tokens")
         if tokens is None:
             return batch
-        new_tokens, new_pos, new_labels, new_loss_mask, new_attn = expand_batch_for_memory_tokens(
+        new_tokens, new_pos, new_labels, new_loss_mask, new_attn = prepend_batch_for_memory_tokens(
             tokens=tokens,
             position_ids=batch.get("position_ids"),
             labels=batch.get("labels"),
