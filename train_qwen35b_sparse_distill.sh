@@ -18,7 +18,7 @@ mkdir -p ${LOG_DIR}
 LOG_FILE="${LOG_DIR}/train_qwen35b_sparse_distill.log"
 rm -f "${LOG_FILE}"
 
-TB_BASE="${workspace}/Megatron-Bridge/nemo_experiments/default/tb_logs/swa_sl8k_sw1k"
+TB_BASE="${workspace}/Megatron-Bridge/nemo_experiments/default/tb_logs/swa_sl2k_sw1k"
 mkdir -p ${TB_BASE}
 id=0
 while [ -d "${TB_BASE}/exp_${id}" ]; do id=$((id+1)); done
@@ -33,7 +33,8 @@ python -m torch.distributed.run --nproc_per_node=8 \
   --alpha 1.0 \
   --temperature 1.0 \
   --group_size 4 \
-  --segment_size 1024 \
+  --segment_size 8 \
+  --swa_only \
   --pad_token_id 0 \
   logger.tensorboard_dir=${TB_LOG_DIR} \
   2>&1 | tee ${LOG_FILE}

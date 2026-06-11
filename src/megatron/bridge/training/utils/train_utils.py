@@ -848,7 +848,8 @@ def training_log(
                 comet_logger.log_metrics({"iter-energy/gpu": float(energy), "power/gpu": float(power)}, step=iteration)
 
         # Decoupled_learning_rate should be not None only on first and last pipeline stage.
-        log_string += f" learning rate: {learning_rate:.6E} |"
+        if learning_rate is not None:
+            log_string += f" learning rate: {learning_rate:.6E} |"
         log_string += f" global batch size: {batch_size:5d} |"
         for key in total_loss_dict:
             if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:

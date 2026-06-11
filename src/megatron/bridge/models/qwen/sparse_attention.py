@@ -50,6 +50,7 @@ def _build_sparse_prepend_memory_pattern(
     group_size: int,
     segment_size: int,
     device: torch.device,
+    swa_only: bool = False,
 ) -> Tensor:
     """Build the sparse attention mask in *prepend-memory* layout.
 
@@ -71,11 +72,18 @@ def _build_sparse_prepend_memory_pattern(
     ③ m -> t  :  same segment & before group end   seg_m(qi)==seg_t(ki) and ki < (qi+1)*g
     ④ m -> m  :  causal   ki < qi
 
+    SWA stands for **Sliding Window Attention**.  When ``swa_only=True``,
+    rule ② (regular tokens attending to memory tokens from earlier segments)
+    is skipped so the mask only retains the sliding-window component ①.
+
     Args:
         seq_len:     number of **original** tokens (excluding memory tokens).
         group_size:  ``g`` — tokens per compression group.
         segment_size: ``s`` — regular tokens per segment.  Must divide by ``group_size``.
         device:      target torch device.
+        swa_only:    if ``True``, skip rule ② (t -> m) so that regular tokens
+                     only attend within their sliding window (SWA) and never to
+                     memory tokens from previous segments.
 
     Returns:
         Bool tensor of shape ``[I+J, I+J]`` where ``True`` means *attend*.
@@ -113,7 +121,8 @@ def _build_sparse_prepend_memory_pattern(
     mask[:J, J:] = (seg_m == seg_t_col) & (ki_t_for_mq < (qi_m + 1) * g)
 
     # ② t -> m : (ki+1)*g <= qi - (s-1)
-    mask[J:, :J] = (kj_m_for_tq + 1) * g <= qi_t - (s - 1)
+    if not swa_only:
+        mask[J:, :J] = (kj_m_for_tq + 1) * g <= qi_t - (s - 1)
 
     # ① t -> t : sliding window  qi - (s-1) <= ki <= qi
     mask[J:, J:] = (qi_t - (s - 1) <= ki_t) & (ki_t <= qi_t)
@@ -128,11 +137,16 @@ def build_flash_mask(
     sparse_pattern: Optional[Tensor] = None,
     group_size: Optional[int] = None,
     segment_size: Optional[int] = None,
+    swa_only: bool = False,
 ) -> Tensor:
     """Build a bool attention mask of shape ``[s_q, s_k]``.
 
     True positions are *kept* (consistent with ``F.scaled_dot_product_attention``'s
     ``attn_mask`` semantics when ``dtype=bool``: True allows attention).
+
+    SWA stands for **Sliding Window Attention**.  When ``swa_only=True``,
+    regular tokens only attend within their sliding window and never to
+    memory tokens from previous segments (rule ② is skipped).
 
     Args:
         seq_len_q: query sequence length.
@@ -147,6 +161,9 @@ def build_flash_mask(
             causal mask. Requires ``seq_len_q == seq_len_k``.
         segment_size: number of *original* tokens per segment (``s`` in the
             reference). Must be divisible by ``group_size``.
+        swa_only:   if ``True``, skip rule ② (t -> m) so that regular tokens
+            only attend within their sliding window (SWA) and never to memory
+            tokens from previous segments.
 
     Returns:
         Bool tensor of shape ``[s_q, s_k]``.
@@ -160,7 +177,7 @@ def build_flash_mask(
         # seq_len_q here is the *expanded* sequence length (including memory tokens).
         # _build_sparse_prepend_memory_pattern expects the *original* token count.
         original_seq_len = seq_len_q * group_size // (group_size + 1)
-        mask = _build_sparse_prepend_memory_pattern(original_seq_len, group_size, segment_size, device)
+        mask = _build_sparse_prepend_memory_pattern(original_seq_len, group_size, segment_size, device, swa_only=swa_only)
     elif causal:
         mask = torch.ones(seq_len_q, seq_len_k, device=device, dtype=torch.bool).tril_()
     else:
@@ -190,6 +207,7 @@ class FlashMaskAttention(MegatronModule):
         pg_collection=None,
         group_size: Optional[int] = None,
         segment_size: Optional[int] = None,
+        swa_only: bool = False,
     ):
         super().__init__(config=config)
         self.config = config
@@ -223,6 +241,7 @@ class FlashMaskAttention(MegatronModule):
         self.softmax_scale = softmax_scale  # if None, SDPA uses 1/sqrt(d_k)
         self.group_size = group_size
         self.segment_size = segment_size
+        self.swa_only = swa_only
 
     def forward(
         self,
@@ -263,6 +282,7 @@ class FlashMaskAttention(MegatronModule):
             sparse_pattern=None,
             group_size=self.group_size,
             segment_size=self.segment_size,
+            swa_only=self.swa_only,
         )
         # broadcastable to [b, np, sq, sk]
         attn_mask = mask.unsqueeze(0).unsqueeze(0)

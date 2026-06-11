@@ -552,6 +552,15 @@ class TrainingConfig(MTrainTrainingConfig):
     eval_interval: int | None = None
     """Interval between running evaluation on validation set. Deprecated in favor of ValidationConfig."""
 
+    freeze_student: bool = False
+    """Freeze all student model parameters except MemoryTokenInjector and
+    MemoryQkvProjection modules during distillation."""
+
+    swa_only: bool = False
+    """SWA (Sliding Window Attention) only mode. When set, skip rule ② (t -> m)
+    in the sparse attention mask so regular tokens only attend within their
+    sliding window and never to memory tokens from previous segments."""
+
     skip_train: bool | None = None
     """If set, bypass the training loop, optionally do evaluation for validation/test, and exit. Deprecated in favor of ValidationConfig."""
 

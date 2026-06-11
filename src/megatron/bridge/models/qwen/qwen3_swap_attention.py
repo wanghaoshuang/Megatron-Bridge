@@ -90,6 +90,7 @@ def swap_to_flashmask(
     *,
     group_size: Optional[int] = None,
     segment_size: Optional[int] = None,
+    swa_only: bool = False,
 ) -> nn.Module:
     """Replace ``self_attention.core_attention`` of every decoder layer with
     :class:`FlashMaskAttention`.
@@ -114,6 +115,7 @@ def swap_to_flashmask(
             attention_type=getattr(old, "attention_type", "self"),
             group_size=group_size,
             segment_size=segment_size,
+            swa_only=swa_only,
         ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
         self_attn.core_attention = new
     return model

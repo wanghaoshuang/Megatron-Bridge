@@ -3,12 +3,14 @@ model:
   pipeline_model_parallel_size: 1
   expert_model_parallel_size: 4
   sequence_parallel: true
-  seq_length: 2000
+  seq_length: 32
 
 train:
   train_iters: 3000
   micro_batch_size: 1
   global_batch_size: 32
+  freeze_student: true
+  swa_only: true
 
 optimizer:
   lr: 1e-4
@@ -30,7 +32,7 @@ checkpoint:
 
 dataset:
   dataset_root: "/root/paddlejob/amfp-inference-public/wanghaoshuang/data/megatron_sft_fixed"
-  seq_length: 2000
+  seq_length: 32
   dataloader_type: "cyclic"
   memmap_workers: 32
   do_validation: false

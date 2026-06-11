@@ -46,7 +46,6 @@ from megatron.bridge.training.state import GlobalState
 from megatron.bridge.models.qwen.qwen3_swap_attention import AttnOutputCollector
 from megatron.bridge.models.qwen.memory_token import (
     collapse_prepend_to_original_positions,
-    expand_batch_for_memory_tokens,
     prepend_batch_for_memory_tokens,
 )
 

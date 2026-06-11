@@ -32,14 +32,17 @@ Usage::
 import argparse
 import logging
 
-import torch.nn as nn
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
     swap_to_flashmask,
     swap_to_memory_qkv,
 )
-from megatron.bridge.models.qwen.memory_token import register_prepend_memory_token_injector
+from megatron.bridge.models.qwen.memory_token import (
+    MemoryQkvProjection,
+    PrependMemoryTokenInjector,
+    register_prepend_memory_token_injector,
+)
 from megatron.bridge.recipes.qwen.qwen3_moe import qwen3_30b_a3b_sft_config
 from megatron.bridge.training.callbacks import Callback, CallbackContext, CallbackManager
 from megatron.bridge.training.config import ConfigContainer, FinetuningDatasetConfig
@@ -51,62 +54,26 @@ from megatron.bridge.training.utils.omegaconf_utils import process_config_with_o
 logger = logging.getLogger(__name__)
 
 
-def _refresh_ddp_pre_hooks(model: nn.Module) -> None:
-    """Re-register DDP forward pre-hooks after submodule replacement.
-
-    swap_to_flashmask replaces core_attention submodules in place on a DDP-wrapped
-    model. DDP's remove_forward_pre_hook_handles still holds handles for the old
-    modules, and the new FlashMaskAttention instances are unknown to it. This causes
-    KeyError in disable_forward_pre_hook when it iterates self.module.modules().
-
-    Fix: remove stale handles, clear the registry, then re-register for all current
-    submodules so DDP's hook state is consistent.
-    """
-    try:
-        from megatron.core.distributed import DistributedDataParallel as CoreDDP
-    except ImportError:
-        return
-    if not isinstance(model, CoreDDP) or not model.use_forward_hook:
-        return
-    for handle in model.remove_forward_pre_hook_handles.values():
-        handle.remove()
-    model.remove_forward_pre_hook_handles.clear()
-    model.enable_forward_pre_hook()
-
-
 class _SparseDistillSetup(Callback):
-    """Hooks called at training start to: (1) swap student attention to
-    FlashMaskAttention, (2) build the teacher model, (3) attach hooks for both."""
+    """Hooks called at training start to attach output collectors for both
+    student and teacher models.
+
+    Note: structural model modifications (swap_to_flashmask, swap_to_memory_qkv,
+    freeze_student) are applied via a ``pre_wrap_hook`` so they run *before*
+    DDP wrapping and optimizer creation.  This callback only attaches the
+    ``AttnOutputCollector`` hooks and builds the teacher model.
+    """
 
     def __init__(
         self,
         hf_path: str,
         forward_step: SparseDistillForwardStep,
-        group_size: int = 0,
-        segment_size: int = 0,
     ) -> None:
         self.hf_path = hf_path
         self.forward_step = forward_step
-        self.group_size = group_size
-        self.segment_size = segment_size
 
     def on_train_start(self, context: CallbackContext) -> None:
-        # Student: swap attention in place. Weights of linear_qkv / linear_proj /
-        # qk_layernorm are preserved.
-        sparse_kwargs = {}
-        if self.group_size > 0 and self.segment_size > 0:
-            sparse_kwargs = {"group_size": self.group_size, "segment_size": self.segment_size}
         for chunk in context.model:
-            swap_to_flashmask(chunk, **sparse_kwargs)
-            if self.group_size > 0:
-                swap_to_memory_qkv(chunk, group_size=self.group_size)
-            # swap_to_flashmask replaces core_attention submodules after DDP has
-            # already registered forward pre-hooks for the original modules.  The
-            # new FlashMaskAttention instances are absent from DDP's
-            # remove_forward_pre_hook_handles, which causes KeyError when
-            # disable_forward_pre_hook iterates self.module.modules().
-            # Refresh DDP hook registration to include the swapped-in modules.
-            _refresh_ddp_pre_hooks(chunk)
             self.forward_step.student_collector.attach(chunk)
 
         # Teacher: a fresh GPTModel with the same provider but standard attention.
@@ -156,6 +123,15 @@ def parse_args():
         default=0,
         help="Sparse-mask segment size s (in original tokens). Must be a multiple "
              "of --group_size. 0 disables the interleaved sparse mask (causal only).",
+    )
+    p.add_argument(
+        "--swa_only",
+        action="store_true",
+        default=False,
+        help="When set, skip rule ② (t -> m) in the sparse attention mask. "
+             "SWA = Sliding Window Attention: regular tokens will only attend "
+             "within their sliding window and not to memory tokens from "
+             "previous segments.",
     )
     p.add_argument(
         "--pad_token_id",
@@ -218,27 +194,48 @@ def main():
         pad_token_id=args.pad_token_id,
     )
 
-    # Register memory-token injector before DDP wraps the student. The pre-wrap
-    # hook receives the list of (un-wrapped) GPTModel chunks; we attach the
-    # injector as a real submodule so DDP picks up its parameters.
-    if args.group_size > 0:
-        group_size = args.group_size
+    # Structural modifications must happen BEFORE DDP wrapping and optimizer
+    # creation so that (a) new parameters (e.g. MemoryQkvProjection.memory_proj)
+    # get main_grad buffers allocated by DDP, and (b) frozen parameters are
+    # excluded from the optimizer's param groups.
+    # We use a pre_wrap_hook which fires inside _build_distributed_model,
+    # after the GPTModel is constructed but before DDP wraps it.
+    freeze_student = cfg.train.freeze_student
+    swa_only = getattr(cfg.train, "swa_only", args.swa_only)
 
-        def _attach_injector(models):
-            for m in models:
-                # Only the first PP stage owns the embedding.
-                if getattr(m, "embedding", None) is None:
-                    continue
-                register_prepend_memory_token_injector(m, group_size=group_size)
-            return models
+    def _modify_student_before_ddp(models):
+        sparse_kwargs = {}
+        if args.group_size > 0 and args.segment_size > 0:
+            sparse_kwargs = {
+                "group_size": args.group_size,
+                "segment_size": args.segment_size,
+                "swa_only": swa_only,
+            }
+        for m in models:
+            swap_to_flashmask(m, **sparse_kwargs)
+            if args.group_size > 0:
+                swap_to_memory_qkv(m, group_size=args.group_size)
 
-        cfg.model.register_pre_wrap_hook(_attach_injector)
+            # Attach memory-token injector on the first PP stage.
+            if args.group_size > 0 and getattr(m, "embedding", None) is not None:
+                register_prepend_memory_token_injector(m, group_size=args.group_size)
+
+            # Freeze all parameters except MemoryTokenInjector and
+            # MemoryQkvProjection so only they are trained.
+            if freeze_student:
+                for p in m.parameters():
+                    p.requires_grad_(False)
+                for module in m.modules():
+                    if isinstance(module, (PrependMemoryTokenInjector, MemoryQkvProjection)):
+                        for p in module.parameters():
+                            p.requires_grad_(True)
+        return models
+
+    cfg.model.register_pre_wrap_hook(_modify_student_before_ddp)
 
     cb = _SparseDistillSetup(
         hf_path=args.hf_path,
         forward_step=forward_step,
-        group_size=args.group_size,
-        segment_size=args.segment_size,
     )
     cm = CallbackManager()
     cm.add(cb)
