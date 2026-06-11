@@ -37,6 +37,56 @@ import torch
 import torch.nn as nn
 
 
+class MemoryQkvProjection(nn.Module):
+    """Wraps an existing ``linear_qkv`` and appends a per-memory-token projection.
+
+    After the base ``linear_qkv`` produces ``mixed_qkv, bias``, this module
+    applies a separate linear projection (with kaiming-initialized weights)
+    to the QKV values at memory-token positions only.  Real-token QKV values
+    are left untouched.
+
+    This follows the prepend layout: memory tokens sit at the first ``K``
+    positions of the hidden-states sequence, where ``K = s_expanded // (g + 1)``.
+
+    The module satisfies :class:`~megatron.core.transformer.attention.LinearQkvInterface`
+    so it can replace ``self.linear_qkv`` on a ``SelfAttention`` instance.
+    """
+
+    def __init__(
+        self,
+        linear_qkv: nn.Module,
+        qkv_out_dim: int,
+        group_size: int,
+    ) -> None:
+        super().__init__()
+        self.linear_qkv = linear_qkv
+        self.group_size = group_size
+        # Independent projection for memory-token QKV, same in/out dimensions.
+        self.memory_proj = nn.Linear(qkv_out_dim, qkv_out_dim, bias=False)
+        nn.init.kaiming_normal_(self.memory_proj.weight)
+
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, object]:
+        mixed_qkv, bias = self.linear_qkv(hidden_states)
+
+        g = self.group_size
+        s_expanded = mixed_qkv.size(0)
+        K = s_expanded // (g + 1)
+        if K == 0:
+            return mixed_qkv, bias
+
+        # Project only the memory-token positions (first K rows).
+        mem_qkv = mixed_qkv[:K]                        # [K, b, qkv_dim]
+        projected = self.memory_proj(mem_qkv)           # [K, b, qkv_dim]
+
+        # Replace in-place on a clone to keep autograd clean.
+        result = mixed_qkv.clone()
+        result[:K] = projected.to(dtype=result.dtype)
+        return result, bias
+
+    def backward_dw(self) -> None:
+        self.linear_qkv.backward_dw()
+
+
 class MemoryTokenInjector(nn.Module):
     """Insert one trainable memory token at the end of every group of ``g`` tokens.
 

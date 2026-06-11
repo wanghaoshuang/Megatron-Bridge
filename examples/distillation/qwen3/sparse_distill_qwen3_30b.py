@@ -37,6 +37,7 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
     swap_to_flashmask,
+    swap_to_memory_qkv,
 )
 from megatron.bridge.models.qwen.memory_token import register_prepend_memory_token_injector
 from megatron.bridge.recipes.qwen.qwen3_moe import qwen3_30b_a3b_sft_config
@@ -97,6 +98,8 @@ class _SparseDistillSetup(Callback):
             sparse_kwargs = {"group_size": self.group_size, "segment_size": self.segment_size}
         for chunk in context.model:
             swap_to_flashmask(chunk, **sparse_kwargs)
+            if self.group_size > 0:
+                swap_to_memory_qkv(chunk, group_size=self.group_size)
             # swap_to_flashmask replaces core_attention submodules after DDP has
             # already registered forward pre-hooks for the original modules.  The
             # new FlashMaskAttention instances are absent from DDP's

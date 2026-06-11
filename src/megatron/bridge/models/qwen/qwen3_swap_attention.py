@@ -28,6 +28,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection
 from megatron.bridge.models.qwen.sparse_attention import FlashMaskAttention
 
 
@@ -42,6 +43,46 @@ def _iter_decoder_layers(model: nn.Module) -> Iterable[nn.Module]:
         return
     for layer in decoder.layers:
         yield layer
+
+
+def swap_to_memory_qkv(
+    model: nn.Module,
+    group_size: int,
+) -> nn.Module:
+    """Replace ``self_attention.linear_qkv`` of every decoder layer with
+    :class:`MemoryQkvProjection`, which wraps the original ``linear_qkv``
+    and appends a per-memory-token projection.
+
+    The original ``linear_qkv`` weights are preserved. A new
+    ``nn.Linear(qkv_out_dim, qkv_out_dim, bias=False)`` with kaiming
+    initialization is created for each layer and applied only to the
+    memory-token positions (the first ``K`` rows in the prepend layout)
+    of the ``mixed_qkv`` output.
+
+    This follows the same in-place replacement pattern as
+    :func:`swap_to_flashmask`.
+    """
+    for layer in _iter_decoder_layers(model):
+        self_attn = getattr(layer, "self_attention", None)
+        if self_attn is None or not hasattr(self_attn, "linear_qkv"):
+            continue
+        # qkv_out_dim must reflect the per-TP-rank dimension, not the global one.
+        # self_attn.linear_qkv_out_dim stores the *global* QKV output dimension
+        # (before TP column parallel split), so we must divide by tp_size.
+        # Fallback: infer from the weight shape, which is already TP-sharded.
+        tp_size = getattr(self_attn.config, "tensor_model_parallel_size", 1)
+        global_qkv_out_dim = getattr(self_attn, "linear_qkv_out_dim", None)
+        if global_qkv_out_dim is not None:
+            qkv_out_dim = global_qkv_out_dim // tp_size
+        else:
+            qkv_out_dim = self_attn.linear_qkv.weight.size(0)
+        wrapped = MemoryQkvProjection(
+            linear_qkv=self_attn.linear_qkv,
+            qkv_out_dim=qkv_out_dim,
+            group_size=group_size,
+        ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
+        self_attn.linear_qkv = wrapped
+    return model
 
 
 def swap_to_flashmask(
