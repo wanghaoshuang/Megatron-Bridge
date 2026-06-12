@@ -226,8 +226,11 @@ def main():
                 for p in m.parameters():
                     p.requires_grad_(False)
                 for module in m.modules():
-                    if isinstance(module, (PrependMemoryTokenInjector, MemoryQkvProjection)):
+                    if isinstance(module, PrependMemoryTokenInjector):
                         for p in module.parameters():
+                            p.requires_grad_(True)
+                    elif isinstance(module, MemoryQkvProjection):
+                        for p in module.memory_proj.parameters():
                             p.requires_grad_(True)
         return models
 
