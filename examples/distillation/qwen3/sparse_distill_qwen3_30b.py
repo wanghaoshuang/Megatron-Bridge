@@ -183,6 +183,13 @@ def main():
         path = Path(args.data_path)
         cfg.dataset.dataset_root = path.parent if path.suffix == ".jsonl" else path
 
+    freeze_student = cfg.train.freeze_student
+    swa_only = getattr(cfg.train, "swa_only", args.swa_only)
+    alpha = getattr(cfg.train, "distill_alpha", args.alpha)
+    beta = getattr(cfg.train, "distill_beta", args.beta)
+    temperature = getattr(cfg.train, "distill_temperature", args.temperature)
+    use_jsd = getattr(cfg.train, "use_jsd", False)
+
     student_collector = AttnOutputCollector()
     teacher_collector = AttnOutputCollector()
     forward_step = SparseDistillForwardStep(
@@ -203,12 +210,6 @@ def main():
     # excluded from the optimizer's param groups.
     # We use a pre_wrap_hook which fires inside _build_distributed_model,
     # after the GPTModel is constructed but before DDP wraps it.
-    freeze_student = cfg.train.freeze_student
-    swa_only = getattr(cfg.train, "swa_only", args.swa_only)
-    alpha = getattr(cfg.train, "distill_alpha", args.alpha)
-    beta = getattr(cfg.train, "distill_beta", args.beta)
-    temperature = getattr(cfg.train, "distill_temperature", args.temperature)
-    use_jsd = getattr(cfg.train, "use_jsd", False)
 
     def _modify_student_before_ddp(models):
         sparse_kwargs = {}

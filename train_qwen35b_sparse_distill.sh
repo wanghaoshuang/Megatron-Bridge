@@ -18,7 +18,7 @@ mkdir -p ${LOG_DIR}
 LOG_FILE="${LOG_DIR}/train_qwen35b_sparse_distill.log"
 rm -f "${LOG_FILE}"
 
-TB_BASE="${workspace}/Megatron-Bridge/nemo_experiments/default/tb_logs/swa_sl8k_sw1k_gs4"
+TB_BASE="/root/paddlejob/amfp-inference-public/wanghaoshuang/tb_logs/msa_sl8k_sw1k_gs4_jsd_alpha1_beta1"
 mkdir -p ${TB_BASE}
 id=0
 while [ -d "${TB_BASE}/exp_${id}" ]; do id=$((id+1)); done

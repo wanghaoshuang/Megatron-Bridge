@@ -14,7 +14,7 @@ train:
   distill_alpha: 1.0
   distill_beta: 1.0
   distill_temperature: 1.0
-  use_jsd: false
+  use_jsd: true
 
 optimizer:
   lr: 1e-4
