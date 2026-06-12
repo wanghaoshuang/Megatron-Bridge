@@ -185,6 +185,9 @@ def main():
 
     freeze_student = cfg.train.freeze_student
     swa_only = getattr(cfg.train, "swa_only", args.swa_only)
+    train_memory_compression_projection = getattr(cfg.train, "train_memory_compression_projection", True)
+    train_memory_qkv_projection = getattr(cfg.train, "train_memory_qkv_projection", True)
+    train_common_qkv_projection = getattr(cfg.train, "train_common_qkv_projection", False)
     alpha = getattr(cfg.train, "distill_alpha", args.alpha)
     beta = getattr(cfg.train, "distill_beta", args.beta)
     temperature = getattr(cfg.train, "distill_temperature", args.temperature)
@@ -228,18 +231,22 @@ def main():
             if args.group_size > 0 and getattr(m, "embedding", None) is not None:
                 register_prepend_memory_token_injector(m, group_size=args.group_size)
 
-            # Freeze all parameters except MemoryTokenInjector and
-            # MemoryQkvProjection so only they are trained.
+            # Freeze all parameters except selected modules based on config.
             if freeze_student:
                 for p in m.parameters():
                     p.requires_grad_(False)
                 for module in m.modules():
                     if isinstance(module, PrependMemoryTokenInjector):
-                        for p in module.parameters():
-                            p.requires_grad_(True)
+                        if train_memory_compression_projection:
+                            for p in module.parameters():
+                                p.requires_grad_(True)
                     elif isinstance(module, MemoryQkvProjection):
-                        for p in module.memory_proj.parameters():
-                            p.requires_grad_(True)
+                        if train_memory_qkv_projection:
+                            for p in module.memory_proj.parameters():
+                                p.requires_grad_(True)
+                        if train_common_qkv_projection:
+                            for p in module.linear_qkv.parameters():
+                                p.requires_grad_(True)
         return models
 
     cfg.model.register_pre_wrap_hook(_modify_student_before_ddp)
