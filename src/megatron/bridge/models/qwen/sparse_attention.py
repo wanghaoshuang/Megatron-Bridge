@@ -168,6 +168,12 @@ def build_flash_mask(
     Returns:
         Bool tensor of shape ``[s_q, s_k]``.
     """
+    
+    cache_key = (seq_len_q, seq_len_k, causal, group_size, segment_size, swa_only,
+                 id(sparse_pattern) if sparse_pattern is not None else None)
+    if cache_key in _SPARSE_MASK_CACHE:
+        return _SPARSE_MASK_CACHE[cache_key].to(device=device)
+
     if group_size is not None and segment_size is not None:
         if seq_len_q != seq_len_k:
             raise ValueError(
@@ -184,6 +190,8 @@ def build_flash_mask(
         mask = torch.ones(seq_len_q, seq_len_k, device=device, dtype=torch.bool)
     if sparse_pattern is not None:
         mask = mask & sparse_pattern.to(device=device, dtype=torch.bool)
+
+    _SPARSE_MASK_CACHE[cache_key] = mask
     return mask
 
 
