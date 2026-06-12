@@ -561,6 +561,18 @@ class TrainingConfig(MTrainTrainingConfig):
     in the sparse attention mask so regular tokens only attend within their
     sliding window and never to memory tokens from previous segments."""
 
+    distill_alpha: float = 1.0
+    """Weight for the LM cross-entropy loss in distillation: total = alpha * lm_loss + beta * kl."""
+
+    distill_beta: float = 1.0
+    """Weight for the KL distillation loss: total = alpha * lm_loss + beta * kl."""
+
+    distill_temperature: float = 1.0
+    """Temperature for KL distillation loss."""
+
+    use_jsd: bool = False
+    """Use Jensen-Shannon divergence instead of KL divergence for distillation."""
+
     skip_train: bool | None = None
     """If set, bypass the training loop, optionally do evaluation for validation/test, and exit. Deprecated in favor of ValidationConfig."""
 

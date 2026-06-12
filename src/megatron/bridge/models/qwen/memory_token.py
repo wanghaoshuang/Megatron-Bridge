@@ -174,31 +174,6 @@ class PrependMemoryTokenInjector(nn.Module):
         return result
 
 
-def prepend_memory_position_mask(s_expanded: int, group_size: int, device: torch.device) -> torch.Tensor:
-    """Boolean ``[s']`` mask: ``True`` at memory-token positions for the prepend layout.
-
-    Memory tokens occupy the first ``K = (s_expanded * g) // (g + 1)`` positions
-    (equivalently ``K = s_expanded // (g + 1)``).
-    """
-    g = group_size
-    K = s_expanded // (g + 1)
-    mask = torch.zeros(s_expanded, dtype=torch.bool, device=device)
-    if K > 0:
-        mask[:K] = True
-    return mask
-
-
-def memory_position_mask(s_expanded: int, group_size: int, device: torch.device) -> torch.Tensor:
-    """Boolean ``[s']`` mask: ``True`` at memory-token positions."""
-    g = group_size
-    K = s_expanded // (g + 1)
-    mask = torch.zeros(s_expanded, dtype=torch.bool, device=device)
-    if K > 0:
-        idx = torch.arange(K, device=device) * (g + 1) + g
-        mask[idx] = True
-    return mask
-
-
 def prepend_batch_for_memory_tokens(
     tokens: torch.Tensor,
     position_ids: torch.Tensor,

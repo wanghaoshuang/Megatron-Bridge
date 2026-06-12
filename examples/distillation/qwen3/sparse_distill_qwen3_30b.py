@@ -109,6 +109,7 @@ def parse_args():
         help="Path to a JSONL pretraining-style dataset file or a directory containing training.jsonl.",
     )
     p.add_argument("--alpha", type=float, default=1.0)
+    p.add_argument("--beta", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--dataset", type=str, default=None, choices=DATASET_TYPES)
     p.add_argument(
@@ -188,8 +189,10 @@ def main():
         teacher_models=[],
         student_collector=student_collector,
         teacher_collector=teacher_collector,
-        alpha=args.alpha,
-        temperature=args.temperature,
+        alpha=alpha,
+        beta=beta,
+        temperature=temperature,
+        use_jsd=use_jsd,
         group_size=args.group_size,
         pad_token_id=args.pad_token_id,
     )
@@ -202,6 +205,10 @@ def main():
     # after the GPTModel is constructed but before DDP wraps it.
     freeze_student = cfg.train.freeze_student
     swa_only = getattr(cfg.train, "swa_only", args.swa_only)
+    alpha = getattr(cfg.train, "distill_alpha", args.alpha)
+    beta = getattr(cfg.train, "distill_beta", args.beta)
+    temperature = getattr(cfg.train, "distill_temperature", args.temperature)
+    use_jsd = getattr(cfg.train, "use_jsd", False)
 
     def _modify_student_before_ddp(models):
         sparse_kwargs = {}

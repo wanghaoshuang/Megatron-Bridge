@@ -19,7 +19,7 @@ Pipeline:
   - Teacher (A): original Qwen3 with standard attention; eval-mode, no_grad.
   - Both attached with :class:`AttnOutputCollector` hooks. After a forward,
     we have ``[s, b, h]`` core-attention outputs from each decoder layer.
-  - Total loss = LM CE + alpha * sum_l KL(softmax(s_l/T) || softmax(t_l/T)) * T^2
+  - Total loss = alpha * LM CE + beta * sum_l KL(softmax(s_l/T) || softmax(t_l/T)) * T^2
 
 Usage::
 
@@ -28,6 +28,7 @@ Usage::
         student_collector=student_collector,
         teacher_collector=teacher_collector,
         alpha=1.0,
+        beta=1.0,
         temperature=1.0,
     )
     pretrain(cfg, forward_step_func=forward_step)
@@ -56,12 +57,15 @@ def kl_per_layer(
     teacher_outs: List[torch.Tensor],
     loss_mask: torch.Tensor,
     temperature: float = 1.0,
+    use_jsd: bool = False,
 ) -> torch.Tensor:
-    """KL divergence between per-layer core-attention outputs.
+    """Divergence between per-layer core-attention outputs.
 
     Each tensor: ``[s, b, h]``. We treat the last dim as the distribution and
-    apply ``softmax`` after temperature scaling. Per-token KL is averaged using
-    ``loss_mask`` (``[b, s]``); contributions are summed across layers.
+    apply ``softmax`` after temperature scaling. Per-token divergence is averaged
+    using ``loss_mask`` (``[b, s]``); contributions are summed across layers.
+
+    When ``use_jsd`` is True, uses Jensen–Shannon divergence instead of KL.
 
     Returns a scalar tensor (sum across layers).
     """
@@ -83,9 +87,15 @@ def kl_per_layer(
             raise RuntimeError(f"attn output shape mismatch: {s_o.shape} vs {t_o.shape}")
         s_logp = F.log_softmax(s_o / T, dim=-1)
         t_p = F.softmax(t_o.detach() / T, dim=-1)
-        # F.kl_div(reduction='none'): elementwise t_p * (log t_p - s_logp)
-        kl = F.kl_div(s_logp, t_p, reduction="none").sum(dim=-1, keepdim=True)  # [s, b, 1]
-        kl = (kl * m).sum() / denom
+        if use_jsd:
+            # Jensen–Shannon divergence: JSD = 0.5 * KL(P||M) + 0.5 * KL(Q||M), M = 0.5*(P+Q)
+            m_dist = 0.5 * (t_p + s_logp.exp())
+            log_m = m_dist.log().clamp_min(-100)
+            div = 0.5 * F.kl_div(log_m, t_p, reduction="none") + 0.5 * F.kl_div(log_m, s_logp.exp(), reduction="none")
+        else:
+            # F.kl_div(reduction='none'): elementwise t_p * (log t_p - s_logp)
+            div = F.kl_div(s_logp, t_p, reduction="none")
+        kl = (div.sum(dim=-1, keepdim=True) * m).sum() / denom  # [s, b, 1]
         total = total + kl * (T * T)
 
     return total
@@ -97,7 +107,9 @@ def _sparse_distill_loss(
     student_collector: AttnOutputCollector,
     teacher_collector: AttnOutputCollector,
     alpha: float,
+    beta: float,
     temperature: float,
+    use_jsd: bool,
     check_for_nan_in_loss: bool,
     check_for_spiky_loss: bool,
     teacher_loss_mask: torch.Tensor = None,
@@ -139,8 +151,9 @@ def _sparse_distill_loss(
         teacher_outs,
         loss_mask=kl_mask,
         temperature=temperature,
+        use_jsd=use_jsd,
     )
-    total = lm_loss + alpha * kl
+    total = alpha * lm_loss + beta * kl
     report["lm_loss"] = lm_loss.detach()
     report["kl_loss"] = kl.detach()
     report["total_loss"] = total.detach()
@@ -168,7 +181,9 @@ class SparseDistillForwardStep:
         student_collector: AttnOutputCollector,
         teacher_collector: AttnOutputCollector,
         alpha: float = 1.0,
+        beta: float = 1.0,
         temperature: float = 1.0,
+        use_jsd: bool = False,
         group_size: int = 0,
         pad_token_id: int = 0,
     ) -> None:
@@ -176,7 +191,9 @@ class SparseDistillForwardStep:
         self.student_collector = student_collector
         self.teacher_collector = teacher_collector
         self.alpha = alpha
+        self.beta = beta
         self.temperature = temperature
+        self.use_jsd = use_jsd
         self.group_size = group_size
         self.pad_token_id = pad_token_id
 
@@ -226,7 +243,9 @@ class SparseDistillForwardStep:
             student_collector=self.student_collector,
             teacher_collector=self.teacher_collector,
             alpha=self.alpha,
+            beta=self.beta,
             temperature=self.temperature,
+            use_jsd=self.use_jsd,
             check_for_nan_in_loss=state.cfg.rerun_state_machine.check_for_nan_in_loss,
             check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
             teacher_loss_mask=teacher_loss_mask,
