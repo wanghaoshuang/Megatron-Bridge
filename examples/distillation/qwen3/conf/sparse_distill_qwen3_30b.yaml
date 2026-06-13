@@ -9,7 +9,6 @@ train:
   train_iters: 3000
   micro_batch_size: 1
   global_batch_size: 32
-  freeze_student: true
   swa_only: true
   distill_alpha: 1.0
   distill_beta: 1.0
@@ -17,7 +16,7 @@ train:
   use_jsd: false
   train_memory_compression_projection: false
   train_memory_qkv_projection: false
-  train_common_qkv_projection: false
+  train_common_qkv_projection: true
 
 optimizer:
   lr: 1e-4

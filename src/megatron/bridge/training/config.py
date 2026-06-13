@@ -573,6 +573,15 @@ class TrainingConfig(MTrainTrainingConfig):
     use_jsd: bool = False
     """Use Jensen-Shannon divergence instead of KL divergence for distillation."""
 
+    train_memory_compression_projection: bool = False
+    """Whether to train the memory compression projection (PrependMemoryTokenInjector) parameters."""
+
+    train_memory_qkv_projection: bool = False
+    """Whether to train the memory-specific QKV projection (MemoryQkvProjection.memory_proj) parameters."""
+
+    train_common_qkv_projection: bool = False
+    """Whether to train the common QKV projection (MemoryQkvProjection.linear_qkv) parameters."""
+
     skip_train: bool | None = None
     """If set, bypass the training loop, optionally do evaluation for validation/test, and exit. Deprecated in favor of ValidationConfig."""
 

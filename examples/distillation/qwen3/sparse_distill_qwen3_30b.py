@@ -38,6 +38,7 @@ from megatron.bridge.models.qwen.qwen3_swap_attention import (
     swap_to_flashmask,
     swap_to_memory_qkv,
 )
+from megatron.core.transformer.attention import SelfAttention
 from megatron.bridge.models.qwen.memory_token import (
     MemoryQkvProjection,
     PrependMemoryTokenInjector,
@@ -59,7 +60,7 @@ class _SparseDistillSetup(Callback):
     student and teacher models.
 
     Note: structural model modifications (swap_to_flashmask, swap_to_memory_qkv,
-    freeze_student) are applied via a ``pre_wrap_hook`` so they run *before*
+    freeze-all-then-selectively-unfreeze) are applied via a ``pre_wrap_hook`` so they run *before*
     DDP wrapping and optimizer creation.  This callback only attaches the
     ``AttnOutputCollector`` hooks and builds the teacher model.
     """
@@ -183,11 +184,10 @@ def main():
         path = Path(args.data_path)
         cfg.dataset.dataset_root = path.parent if path.suffix == ".jsonl" else path
 
-    freeze_student = cfg.train.freeze_student
     swa_only = getattr(cfg.train, "swa_only", args.swa_only)
-    train_memory_compression_projection = getattr(cfg.train, "train_memory_compression_projection", True)
-    train_memory_qkv_projection = getattr(cfg.train, "train_memory_qkv_projection", True)
-    train_common_qkv_projection = getattr(cfg.train, "train_common_qkv_projection", False)
+    train_memory_compression_projection = cfg.train.train_memory_compression_projection
+    train_memory_qkv_projection = cfg.train.train_memory_qkv_projection
+    train_common_qkv_projection = cfg.train.train_common_qkv_projection
     alpha = getattr(cfg.train, "distill_alpha", args.alpha)
     beta = getattr(cfg.train, "distill_beta", args.beta)
     temperature = getattr(cfg.train, "distill_temperature", args.temperature)
@@ -232,22 +232,32 @@ def main():
             if args.group_size > 0 and getattr(m, "embedding", None) is not None:
                 register_prepend_memory_token_injector(m, group_size=args.group_size)
 
+            print(f"train_memory_compression_projection: {train_memory_compression_projection}; train_memory_qkv_projection :{train_memory_qkv_projection}; train_common_qkv_projection: {train_common_qkv_projection}")
             # Freeze all parameters except selected modules based on config.
-            if freeze_student:
-                for p in m.parameters():
-                    p.requires_grad_(False)
-                for module in m.modules():
-                    if isinstance(module, PrependMemoryTokenInjector):
-                        if train_memory_compression_projection:
-                            for p in module.parameters():
-                                p.requires_grad_(True)
-                    elif isinstance(module, MemoryQkvProjection):
-                        if train_memory_qkv_projection:
-                            for p in module.memory_proj.parameters():
-                                p.requires_grad_(True)
-                        if train_common_qkv_projection:
-                            for p in module.linear_qkv.parameters():
-                                p.requires_grad_(True)
+            for p in m.parameters():
+                p.requires_grad_(False)
+            for module in m.modules():
+                if isinstance(module, PrependMemoryTokenInjector):
+                    if train_memory_compression_projection:
+                        for p in module.parameters():
+                            p.requires_grad_(True)
+                elif isinstance(module, MemoryQkvProjection):
+                    if train_memory_qkv_projection:
+                        for p in module.memory_proj.parameters():
+                            p.requires_grad_(True)
+                    if train_common_qkv_projection:
+                        for p in module.linear_qkv.parameters():
+                            p.requires_grad_(True)
+                # elif isinstance(module, SelfAttention):
+                #     if train_common_qkv_projection and hasattr(module, "linear_qkv"):
+                #         for p in module.linear_qkv.parameters():
+                #             p.requires_grad_(True)
+                                
+            # Log all trainable parameters.
+            for n, p in m.named_parameters():
+                if p.requires_grad:
+                    print(f"[Trainable] {n}, shape={list(p.shape)}")
+
         return models
 
     cfg.model.register_pre_wrap_hook(_modify_student_before_ddp)
