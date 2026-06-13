@@ -142,8 +142,8 @@ def parse_args():
     )
     args, cli_overrides = p.parse_known_args()
     if args.segment_size > 0:
-        if args.group_size <= 0:
-            raise ValueError("--segment_size requires --group_size > 0")
+        # if args.group_size <= 0:
+        #     raise ValueError("--segment_size requires --group_size > 0")
         if args.segment_size % args.group_size != 0:
             raise ValueError(
                 f"--segment_size ({args.segment_size}) must be divisible by "
@@ -216,14 +216,15 @@ def main():
 
     def _modify_student_before_ddp(models):
         sparse_kwargs = {}
-        if args.group_size > 0 and args.segment_size > 0:
+        if args.segment_size > 0:
             sparse_kwargs = {
                 "group_size": args.group_size,
                 "segment_size": args.segment_size,
                 "swa_only": swa_only,
             }
         for m in models:
-            swap_to_flashmask(m, **sparse_kwargs)
+            if args.group_size > 0:
+                swap_to_flashmask(m, **sparse_kwargs)
             if args.group_size > 0:
                 swap_to_memory_qkv(m, group_size=args.group_size)
 
