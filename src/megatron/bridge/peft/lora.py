@@ -24,7 +24,6 @@ from megatron.core import parallel_state
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.utils import unwrap_model
 
-from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection, PrependMemoryTokenInjector
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.lora_layers import (
     LinearAdapter,
@@ -204,6 +203,14 @@ class MemorySparseAttentionLoRA(LoRA):
             return model
 
         models = model if isinstance(model, list) else [model]
+        # Lazy import to avoid circular dependency:
+        #   peft.lora -> models.qwen.memory_token -> models.qwen.__init__
+        #   -> models.qwen.qwen2_bridge -> models.conversion.model_bridge
+        #   -> models.conversion.peft_bridge -> peft.lora
+        from megatron.bridge.models.qwen.memory_token import (
+            MemoryQkvProjection,
+            PrependMemoryTokenInjector,
+        )
         for m in models:
             for module in m.modules():
                 if isinstance(module, MemoryQkvProjection) and self.train_memory_proj:

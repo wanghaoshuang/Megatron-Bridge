@@ -19,6 +19,9 @@ model:
   group_size: 4
   segment_size: 1024
 
+ddp:
+  overlap_grad_reduce: false
+
 train:
   train_iters: 3000
   micro_batch_size: 1

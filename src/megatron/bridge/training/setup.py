@@ -436,29 +436,33 @@ def _create_peft_pre_wrap_hook(
         print_rank_0("Applying PEFT pre-wrap hook...")
 
         # Load pretrained checkpoint if available
-        if cfg.checkpoint.pretrained_checkpoint is None or not checkpoint_exists(cfg.checkpoint.pretrained_checkpoint):
-            raise ValueError(f"Invalid pretrained checkpoint directory found: {cfg.checkpoint.pretrained_checkpoint}")
+        # Skip if weights were already loaded by the model provider (e.g. AutoBridge with load_weights=True)
+        if cfg.checkpoint.pretrained_checkpoint is not None and checkpoint_exists(cfg.checkpoint.pretrained_checkpoint):
+            # Explicitly set finetune to avoid loading optimizer and RNG states
+            cfg.checkpoint.finetune = True
+            state.timers("load-pretrained-checkpoint", log_level=0).start(barrier=True)
+            print_rank_0(f"Loading base model weights from: {cfg.checkpoint.pretrained_checkpoint}")
 
-        # Explicitly set finetune to avoid loading optimizer and RNG states
-        cfg.checkpoint.finetune = True
-        state.timers("load-pretrained-checkpoint", log_level=0).start(barrier=True)
-        print_rank_0(f"Loading base model weights from: {cfg.checkpoint.pretrained_checkpoint}")
-
-        # Directly call load_checkpoint_from path in order to avoid
-        # the load directory overriding the pretrained checkpoint path
-        # This is needed to initialize the base model weights first, and then conditionally load adapter states after
-        _load_checkpoint_from_path(
-            load_dir=cfg.checkpoint.pretrained_checkpoint,
-            state=state,
-            model=model,
-            optimizer=None,  # Don't load optimizer - will be created after PEFT
-            opt_param_scheduler=None,  # Don't load scheduler - will be created after PEFT
-            checkpointing_context={},
-            skip_load_to_model_and_opt=False,
-            ignore_ckpt_step=True,  # ckpt_step applies only to adapter checkpoints, not pretrained base model
-        )
-        state.timers("load-pretrained-checkpoint").stop(barrier=True)
-        state.timers.log(["load-pretrained-checkpoint"])
+            # Directly call load_checkpoint_from path in order to avoid
+            # the load directory overriding the pretrained checkpoint path
+            # This is needed to initialize the base model weights first, and then conditionally load adapter states after
+            _load_checkpoint_from_path(
+                load_dir=cfg.checkpoint.pretrained_checkpoint,
+                state=state,
+                model=model,
+                optimizer=None,  # Don't load optimizer - will be created after PEFT
+                opt_param_scheduler=None,  # Don't load scheduler - will be created after PEFT
+                checkpointing_context={},
+                skip_load_to_model_and_opt=False,
+                ignore_ckpt_step=True,  # ckpt_step applies only to adapter checkpoints, not pretrained base model
+            )
+            state.timers("load-pretrained-checkpoint").stop(barrier=True)
+            state.timers.log(["load-pretrained-checkpoint"])
+        elif cfg.checkpoint.pretrained_checkpoint is not None:
+            print_rank_0(
+                f"WARNING: pretrained_checkpoint={cfg.checkpoint.pretrained_checkpoint} does not exist. "
+                f"Skipping checkpoint load (weights may already be loaded by model provider)."
+            )
 
         # Apply PEFT transformation
         transformed_model = _apply_peft_transformation(cfg.peft, model)

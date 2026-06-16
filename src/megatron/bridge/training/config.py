@@ -1265,7 +1265,12 @@ class ConfigContainer(Container):
             )
 
         if self.peft is not None:
-            assert self.checkpoint.pretrained_checkpoint is not None, "PEFT requires a pretrained checkpoint path"
+            if self.checkpoint.pretrained_checkpoint is None:
+                # PEFT without pretrained_checkpoint is allowed when the model provider
+                # loads weights directly (e.g. AutoBridge with load_weights=True).
+                # The pretrained_checkpoint is only required for loading a Megatron-format
+                # checkpoint at runtime.
+                pass
 
         if self.dataset is not None:
             # Only validate sequence length for GPTDatasetConfig or FinetuningDatasetConfig
