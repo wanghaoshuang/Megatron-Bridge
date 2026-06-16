@@ -110,6 +110,12 @@ class LoRA(PEFT, ModuleMatcher):
         if isinstance(module, adapter_types):
             return module
 
+        # MemoryQkvProjection wraps the real linear_qkv; only apply LoRA to
+        # the inner linear_qkv, not the wrapper itself and not memory_proj.
+        from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection
+        if isinstance(module, MemoryQkvProjection):
+            return module
+
         if (ans := self.match(module, name, prefix)) is not None:
             (match, full_name) = ans
             if isinstance(module, nn.Linear) or (module.__class__ == te.Linear):

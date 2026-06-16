@@ -65,6 +65,11 @@ class MemoryQkvProjection(nn.Module):
         self.memory_proj = nn.Linear(qkv_out_dim, qkv_out_dim, bias=False)
         nn.init.kaiming_normal_(self.memory_proj.weight)
 
+    @property
+    def config(self):
+        """Delegate config to the wrapped linear_qkv so LoRA utilities can access it."""
+        return self.linear_qkv.config
+
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, object]:
         mixed_qkv, bias = self.linear_qkv(hidden_states)
 

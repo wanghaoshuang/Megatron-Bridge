@@ -16,7 +16,7 @@
 ``DotProductAttention``.
 
 This is a placeholder implementation that uses ``F.scaled_dot_product_attention``
-with a custom (currently causal) bool mask. It preserves the exact input/output
+with a custom bool mask (sparse pattern defined by subclasses). It preserves the exact input/output
 contract of ``megatron.core.transformer.dot_product_attention.DotProductAttention``
 so it can be swapped in at runtime without changing the surrounding
 ``SelfAttention`` module or its weights.
@@ -124,7 +124,7 @@ class FlashMaskAttention(MegatronModule):
     ``megatron.core.transformer.dot_product_attention.DotProductAttention``
     so it can be assigned in place of ``self_attention.core_attention``.
 
-    Subclasses must override ``build_flash_mask(seq_len_q, seq_len_k, device, causal)``
+    Subclasses must override ``build_flash_mask(seq_len_q, seq_len_k, device)``
     to return a bool tensor where ``True`` means *attend*.
     """
 
@@ -167,15 +167,13 @@ class FlashMaskAttention(MegatronModule):
     def build_flash_mask(self,
                         seq_len_q: int,
                         seq_len_k: int,
-                        device: torch.device,
-                        causal: bool = False) -> Tensor:
+                        device: torch.device) -> Tensor:
         """Build the attention mask for this module.
 
         Args:
             seq_len_q: query sequence length.
             seq_len_k: key sequence length.
             device: target torch device.
-            causal: whether to build a causal mask (default ``False``).
         """
         pass
 
@@ -210,8 +208,7 @@ class FlashMaskAttention(MegatronModule):
         k_ = key.permute(1, 2, 0, 3).contiguous()
         v_ = value.permute(1, 2, 0, 3).contiguous()
 
-        causal = self.attn_mask_type == AttnMaskType.causal or attn_mask_type == AttnMaskType.causal
-        mask = self.build_flash_mask(sq, sk, device=query.device, causal=causal)
+        mask = self.build_flash_mask(sq, sk, device=query.device)
         # broadcastable to [b, np, sq, sk]
         attn_mask = mask.unsqueeze(0).unsqueeze(0)
 

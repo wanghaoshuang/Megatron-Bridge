@@ -190,17 +190,17 @@ def main():
         path = Path(args.data_path)
         cfg.dataset.dataset_root = path.parent if path.suffix == ".jsonl" else path
 
-    attention_type = getattr(cfg.model, "attention_type", args.attention_type)
-    group_size = getattr(cfg.model, "group_size", args.group_size)
-    segment_size = getattr(cfg.model, "segment_size", args.segment_size)
-    pad_token_id = getattr(cfg.tokenizer, "pad_token_id", args.pad_token_id)
+    attention_type = cfg.model.attention_type
+    group_size = cfg.model.group_size
+    segment_size = cfg.model.segment_size
+    pad_token_id = cfg.tokenizer.pad_token_id
     train_memory_compression_projection = cfg.train.train_memory_compression_projection
     train_memory_qkv_projection = cfg.train.train_memory_qkv_projection
     train_common_qkv_projection = cfg.train.train_common_qkv_projection
-    alpha = getattr(cfg.train, "distill_alpha", args.alpha)
-    beta = getattr(cfg.train, "distill_beta", args.beta)
-    temperature = getattr(cfg.train, "distill_temperature", args.temperature)
-    use_jsd = getattr(cfg.train, "use_jsd", False)
+    alpha = cfg.train.distill_alpha
+    beta = cfg.train.distill_beta
+    temperature = cfg.train.distill_temperature
+    use_jsd = cfg.train.use_jsd
 
     student_collector = AttnOutputCollector()
     teacher_collector = AttnOutputCollector()
@@ -257,9 +257,13 @@ def main():
                                 p.requires_grad_(True)
 
                 # Log all trainable parameters.
+                total_trainable_params = 0
                 for n, p in m.named_parameters():
                     if p.requires_grad:
-                        print(f"[Trainable] {n}, shape={list(p.shape)}")
+                        num_params = p.numel()
+                        total_trainable_params += num_params
+                        logger.info("[Trainable] %s, shape=%s, numel=%d", n, list(p.shape), num_params)
+                logger.info("[Trainable] total trainable parameters: %d", total_trainable_params)
 
         return models
 

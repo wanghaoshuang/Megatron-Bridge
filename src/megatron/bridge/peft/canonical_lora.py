@@ -279,6 +279,12 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
         if isinstance(m, (LinearAdapter, LoRALinear, LoRALinearSplitQKV, LoRALinearSplitFC1UpGate, LoRATopKRouter)):
             return m
 
+        # MemoryQkvProjection wraps the real linear_qkv; only apply LoRA to
+        # the inner linear_qkv, not the wrapper itself and not memory_proj.
+        from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection
+        if isinstance(m, MemoryQkvProjection):
+            return m
+
         if (ans := self.match(m, name, prefix)) is not None:
             (match, full_name) = ans
             if isinstance(m, nn.Linear):

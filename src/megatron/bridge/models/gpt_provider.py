@@ -174,6 +174,14 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
     # Controls whether vocab size should be padded for tensor parallelism
     should_pad_vocab: bool = False
 
+    # Sparse attention / memory-augmented attention configuration
+    attention_type: Literal["full", "swa", "msa"] = "full"
+    """Attention type: 'full' (standard), 'swa' (sliding window), 'msa' (memory-augmented sparse)."""
+    group_size: int = 0
+    """Memory-token group size. 0 disables memory-token augmentation."""
+    segment_size: int = 0
+    """Sparse-mask segment size (in original tokens). Must be a multiple of group_size."""
+
     # MoE / FP8
     num_moe_experts: Optional[int] = None
     moe_grouped_gemm: bool = False

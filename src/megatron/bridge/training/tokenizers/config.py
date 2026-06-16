@@ -79,6 +79,9 @@ class TokenizerConfig:
     eos_token: Optional[str] = None
     """EOS token string to pass to the HuggingFace tokenizer (overrides the model default)."""
 
+    pad_token_id: Optional[int] = None
+    """Token id used as a placeholder for memory slots in student input."""
+
     hf_tokenizer_kwargs: dict[str, Any] | None = field(default_factory=dict)
     """Additional keyword arguments to pass to HuggingFace AutoTokenizer.from_pretrained.
 
