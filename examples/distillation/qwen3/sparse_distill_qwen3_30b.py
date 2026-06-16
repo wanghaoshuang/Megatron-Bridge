@@ -15,8 +15,11 @@
 
 """SparseAttention distillation training entrypoint for Qwen3-30B-A3B.
 
-Student (B): Qwen3-30B-A3B with FlashMaskAttention swapped in for every
-decoder layer.
+Student (B): Qwen3-30B-A3B with attention configured via ``--attention_type``:
+  - ``full``: standard attention (no swaps).
+  - ``swa``: Sliding Window Attention only (FlashMaskAttention with swa_only=True).
+  - ``msa``: Memory-augmented Sparse Attention (FlashMaskAttention, MemoryQkvProjection,
+    and PrependMemoryTokenInjector).
 Teacher (A): original Qwen3-30B-A3B with standard attention, eval-mode + no_grad.
 KL loss is computed between every layer's core-attention output (pre o_proj)
 and added to the standard SFT cross-entropy loss.
@@ -26,6 +29,7 @@ Usage::
     python -m torch.distributed.run --nproc_per_node=8 \\
         examples/distillation/qwen3/sparse_distill_qwen3_30b.py \\
         --hf_path /path/to/Qwen3-30B-A3B \\
+        --attention_type msa \\
         train.train_iters=10
 """
 
@@ -35,8 +39,9 @@ import logging
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
-    swap_to_flashmask,
     swap_to_memory_qkv,
+    swap_to_swa,
+    swap_to_msa,
 )
 from megatron.core.transformer.attention import SelfAttention
 from megatron.bridge.models.qwen.memory_token import (
@@ -114,6 +119,15 @@ def parse_args():
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--dataset", type=str, default=None, choices=DATASET_TYPES)
     p.add_argument(
+        "--attention_type",
+        type=str,
+        default="full",
+        choices=["full", "swa", "msa"],
+        help="Attention type: 'full' (standard attention), 'swa' (sliding window "
+             "attention only), 'msa' (memory-augmented sparse attention with "
+             "memory token injection).",
+    )
+    p.add_argument(
         "--group_size",
         type=int,
         default=0,
@@ -127,29 +141,21 @@ def parse_args():
              "of --group_size. 0 disables the interleaved sparse mask (causal only).",
     )
     p.add_argument(
-        "--swa_only",
-        action="store_true",
-        default=False,
-        help="When set, skip rule ② (t -> m) in the sparse attention mask. "
-             "SWA = Sliding Window Attention: regular tokens will only attend "
-             "within their sliding window and not to memory tokens from "
-             "previous segments.",
-    )
-    p.add_argument(
         "--pad_token_id",
         type=int,
         default=0,
         help="Token id used as a placeholder for memory slots in student input.",
     )
     args, cli_overrides = p.parse_known_args()
-    if args.segment_size > 0:
-        # if args.group_size <= 0:
-        #     raise ValueError("--segment_size requires --group_size > 0")
-        if args.segment_size % args.group_size != 0:
-            raise ValueError(
-                f"--segment_size ({args.segment_size}) must be divisible by "
-                f"--group_size ({args.group_size})"
-            )
+    if args.attention_type != "full" and args.group_size <= 0:
+        raise ValueError(
+            f"--attention_type={args.attention_type} requires --group_size > 0"
+        )
+    if args.segment_size > 0 and args.segment_size % args.group_size != 0:
+        raise ValueError(
+            f"--segment_size ({args.segment_size}) must be divisible by "
+            f"--group_size ({args.group_size})"
+        )
     return args, cli_overrides
 
 
@@ -184,7 +190,10 @@ def main():
         path = Path(args.data_path)
         cfg.dataset.dataset_root = path.parent if path.suffix == ".jsonl" else path
 
-    swa_only = getattr(cfg.train, "swa_only", args.swa_only)
+    attention_type = getattr(cfg.model, "attention_type", args.attention_type)
+    group_size = getattr(cfg.model, "group_size", args.group_size)
+    segment_size = getattr(cfg.model, "segment_size", args.segment_size)
+    pad_token_id = getattr(cfg.tokenizer, "pad_token_id", args.pad_token_id)
     train_memory_compression_projection = cfg.train.train_memory_compression_projection
     train_memory_qkv_projection = cfg.train.train_memory_qkv_projection
     train_common_qkv_projection = cfg.train.train_common_qkv_projection
@@ -203,8 +212,8 @@ def main():
         beta=beta,
         temperature=temperature,
         use_jsd=use_jsd,
-        group_size=args.group_size,
-        pad_token_id=args.pad_token_id,
+        group_size=group_size,
+        pad_token_id=pad_token_id,
     )
 
     # Structural modifications must happen BEFORE DDP wrapping and optimizer
@@ -215,48 +224,42 @@ def main():
     # after the GPTModel is constructed but before DDP wraps it.
 
     def _modify_student_before_ddp(models):
-        sparse_kwargs = {}
-        if args.segment_size > 0:
-            sparse_kwargs = {
-                "group_size": args.group_size,
-                "segment_size": args.segment_size,
-                "swa_only": swa_only,
-            }
         for m in models:
-            if args.group_size > 0:
-                swap_to_flashmask(m, **sparse_kwargs)
-            if args.group_size > 0:
-                swap_to_memory_qkv(m, group_size=args.group_size)
+            if attention_type == "swa":
+                swap_to_swa(m, window_size=segment_size)
+            elif attention_type == "msa":
+                swap_to_msa(m, group_size=group_size, segment_size=segment_size)
+                swap_to_memory_qkv(m, group_size=group_size)
+                # Attach memory-token injector on the first PP stage.
+                if getattr(m, "embedding", None) is not None:
+                    register_prepend_memory_token_injector(m, group_size=group_size)
 
-            # Attach memory-token injector on the first PP stage.
-            if args.group_size > 0 and getattr(m, "embedding", None) is not None:
-                register_prepend_memory_token_injector(m, group_size=args.group_size)
+            # When LoRA (MemorySparseAttentionLoRA) is configured via cfg.peft,
+            # freeze/unfreeze is handled by the PEFT __call__ flow that runs
+            # after this hook. Only apply manual freeze/unfreeze when no PEFT
+            # is configured.
+            if cfg.peft is None:
+                print(f"train_memory_compression_projection: {train_memory_compression_projection}; train_memory_qkv_projection: {train_memory_qkv_projection}; train_common_qkv_projection: {train_common_qkv_projection}")
+                # Freeze all parameters except selected modules based on config.
+                for p in m.parameters():
+                    p.requires_grad_(False)
+                for module in m.modules():
+                    if isinstance(module, PrependMemoryTokenInjector):
+                        if train_memory_compression_projection:
+                            for p in module.parameters():
+                                p.requires_grad_(True)
+                    elif isinstance(module, MemoryQkvProjection):
+                        if train_memory_qkv_projection:
+                            for p in module.memory_proj.parameters():
+                                p.requires_grad_(True)
+                        if train_common_qkv_projection:
+                            for p in module.linear_qkv.parameters():
+                                p.requires_grad_(True)
 
-            print(f"train_memory_compression_projection: {train_memory_compression_projection}; train_memory_qkv_projection :{train_memory_qkv_projection}; train_common_qkv_projection: {train_common_qkv_projection}")
-            # Freeze all parameters except selected modules based on config.
-            for p in m.parameters():
-                p.requires_grad_(False)
-            for module in m.modules():
-                if isinstance(module, PrependMemoryTokenInjector):
-                    if train_memory_compression_projection:
-                        for p in module.parameters():
-                            p.requires_grad_(True)
-                elif isinstance(module, MemoryQkvProjection):
-                    if train_memory_qkv_projection:
-                        for p in module.memory_proj.parameters():
-                            p.requires_grad_(True)
-                    if train_common_qkv_projection:
-                        for p in module.linear_qkv.parameters():
-                            p.requires_grad_(True)
-                # elif isinstance(module, SelfAttention):
-                #     if train_common_qkv_projection and hasattr(module, "linear_qkv"):
-                #         for p in module.linear_qkv.parameters():
-                #             p.requires_grad_(True)
-                                
-            # Log all trainable parameters.
-            for n, p in m.named_parameters():
-                if p.requires_grad:
-                    print(f"[Trainable] {n}, shape={list(p.shape)}")
+                # Log all trainable parameters.
+                for n, p in m.named_parameters():
+                    if p.requires_grad:
+                        print(f"[Trainable] {n}, shape={list(p.shape)}")
 
         return models
 

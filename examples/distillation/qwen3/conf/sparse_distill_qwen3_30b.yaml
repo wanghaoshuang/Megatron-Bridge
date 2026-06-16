@@ -1,22 +1,35 @@
+peft:
+  _target_: megatron.bridge.peft.lora.MemorySparseAttentionLoRA
+  dim: 128
+  alpha: 256
+  dropout: 0.0
+  target_modules: ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "router"]
+  lora_dtype: bfloat16
+  lora_A_init_method: kaiming
+  train_memory_proj: true
+  train_memory_injector: true
+
 model:
+  attention_type: msa # full, swa
   tensor_model_parallel_size: 2
   pipeline_model_parallel_size: 1
   expert_model_parallel_size: 4
   sequence_parallel: true
   seq_length: 8192
+  group_size: 4
+  segment_size: 1024
 
 train:
   train_iters: 3000
   micro_batch_size: 1
   global_batch_size: 32
-  swa_only: true
   distill_alpha: 1.0
   distill_beta: 1.0
   distill_temperature: 1.0
   use_jsd: false
-  train_memory_compression_projection: false
-  train_memory_qkv_projection: false
-  train_common_qkv_projection: true
+  train_memory_compression_projection: true
+  train_memory_qkv_projection: true
+  train_common_qkv_projection: false
 
 optimizer:
   lr: 1e-4
@@ -55,3 +68,4 @@ dataset:
 
 tokenizer:
   eos_token: "<|im_end|>"
+  pad_token_id: 0

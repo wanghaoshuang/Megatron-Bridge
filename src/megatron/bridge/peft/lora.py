@@ -24,6 +24,7 @@ from megatron.core import parallel_state
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.utils import unwrap_model
 
+from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection, PrependMemoryTokenInjector
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.lora_layers import (
     LinearAdapter,
@@ -176,6 +177,78 @@ class LoRA(PEFT, ModuleMatcher):
             else:
                 return LoRALinear(module, adapter)
         return module
+
+
+@dataclass
+class MemorySparseAttentionLoRA(LoRA):
+    """LoRA for SparseAttention distillation with configurable memory-parameter training.
+
+    Extends standard LoRA to optionally unfreeze:
+      - ``MemoryQkvProjection.memory_proj`` — per-memory-token QKV projection
+      - ``PrependMemoryTokenInjector`` — the SwiGLU FFN that produces memory tokens
+
+    This replaces the manual freeze/unfreeze logic previously in the
+    ``_modify_student_before_ddp`` hook of the distillation script.
+    """
+
+    train_memory_proj: bool = False
+    """Whether to train MemoryQkvProjection.memory_proj parameters."""
+
+    train_memory_injector: bool = False
+    """Whether to train PrependMemoryTokenInjector (SwiGLU FFN) parameters."""
+
+    def __call__(self, model, training=True):
+        model = super().__call__(model, training=training)
+
+        if not training:
+            return model
+
+        models = model if isinstance(model, list) else [model]
+        for m in models:
+            for module in m.modules():
+                if isinstance(module, MemoryQkvProjection) and self.train_memory_proj:
+                    for p in module.memory_proj.parameters():
+                        p.requires_grad = True
+                if isinstance(module, PrependMemoryTokenInjector) and self.train_memory_injector:
+                    for p in module.parameters():
+                        p.requires_grad = True
+
+            # Log trainable memory parameters.
+            for n, p in m.named_parameters():
+                if p.requires_grad and ("memory_proj" in n or "prepend_memory_token_injector" in n):
+                    logger.info(f"[MemorySparseAttentionLoRA] Trainable: {n}, shape={list(p.shape)}")
+
+        # Freeze MoE router expert_bias: prevent in-place updates during training.
+        # expert_bias is a buffer (not a parameter) updated heuristically via
+        # _apply_expert_bias(). During LoRA finetuning, LoRA changes seg1 routing
+        # patterns which shifts expert_bias, causing seg0 tokens to be routed to
+        # different experts than the base model — breaking the seg0 bypass guarantee.
+        self._freeze_expert_bias(models)
+
+        return model
+
+    @staticmethod
+    def _freeze_expert_bias(models):
+        """Disable expert_bias update by setting moe_router_bias_update_rate to 0."""
+        from megatron.core.utils import get_model_config
+        try:
+            config = get_model_config(models[0])
+        except Exception:
+            # Fallback: find config from router module
+            config = None
+            for m in models:
+                for module in m.modules():
+                    if hasattr(module, 'expert_bias') and module.expert_bias is not None:
+                        config = module.config
+                        break
+                if config:
+                    break
+        if config is not None:
+            config.moe_router_bias_update_rate = 0
+            logger.info(
+                "[MemorySparseAttentionLoRA] Set config.moe_router_bias_update_rate=0 "
+                "to preserve seg0 routing consistency."
+            )
 
 
 @dataclass

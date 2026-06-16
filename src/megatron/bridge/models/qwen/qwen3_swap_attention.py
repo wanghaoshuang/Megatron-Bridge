@@ -29,7 +29,11 @@ import torch
 import torch.nn as nn
 
 from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection
-from megatron.bridge.models.qwen.sparse_attention import FlashMaskAttention
+from megatron.bridge.models.qwen.sparse_attention import (
+    FlashMaskAttention,
+    MemorySparseAttention,
+    SlidingWindowAttention,
+)
 
 
 def _iter_decoder_layers(model: nn.Module) -> Iterable[nn.Module]:
@@ -85,37 +89,60 @@ def swap_to_memory_qkv(
     return model
 
 
-def swap_to_flashmask(
+def swap_to_msa(
     model: nn.Module,
     *,
     group_size: Optional[int] = None,
     segment_size: Optional[int] = None,
-    swa_only: bool = False,
 ) -> nn.Module:
     """Replace ``self_attention.core_attention`` of every decoder layer with
-    :class:`FlashMaskAttention`.
+    :class:`MemorySparseAttention`.
 
     The replacement preserves ``linear_qkv``, ``linear_proj``, ``q_layernorm``,
     ``k_layernorm`` and the rest of the SelfAttention module, so the existing
     pretrained weights remain valid.
 
-    If ``group_size`` and ``segment_size`` are provided, the swapped
-    attention uses the interleaved (token + memory) sparse mask defined in
-    ``experiments/sparse_attention/sparse_mask.py``.
+    ``group_size`` and ``segment_size`` are required for the interleaved
+    (token + memory) sparse mask.
     """
     for layer in _iter_decoder_layers(model):
         self_attn = getattr(layer, "self_attention", None)
         if self_attn is None or not hasattr(self_attn, "core_attention"):
             continue
         old = self_attn.core_attention
-        new = FlashMaskAttention(
+        new = MemorySparseAttention(
             config=self_attn.config,
-            layer_number=getattr(self_attn, "layer_number", 1),
             attn_mask_type=getattr(old, "attn_mask_type", None),
-            attention_type=getattr(old, "attention_type", "self"),
             group_size=group_size,
             segment_size=segment_size,
-            swa_only=swa_only,
+        ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
+        self_attn.core_attention = new
+    return model
+
+
+def swap_to_swa(
+    model: nn.Module,
+    *,
+    window_size: int,
+) -> nn.Module:
+    """Replace ``self_attention.core_attention`` of every decoder layer with
+    :class:`SlidingWindowAttention`.
+
+    The replacement preserves ``linear_qkv``, ``linear_proj``, ``q_layernorm``,
+    ``k_layernorm`` and the rest of the SelfAttention module, so the existing
+    pretrained weights remain valid.
+
+    ``window_size`` is required and controls the size of the sliding window.
+    """
+    for layer in _iter_decoder_layers(model):
+        self_attn = getattr(layer, "self_attention", None)
+        if self_attn is None or not hasattr(self_attn, "core_attention"):
+            continue
+        old = self_attn.core_attention
+        new = SlidingWindowAttention(
+            config=self_attn.config,
+            attn_mask_type=getattr(old, "attn_mask_type", None),
+            window_size=window_size,
         ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
         self_attn.core_attention = new
     return model
