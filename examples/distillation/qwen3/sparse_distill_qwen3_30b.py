@@ -39,6 +39,8 @@ import logging
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
+    install_seg0_lora_bypass,
+    remove_seg0_lora_bypass,
     swap_to_memory_qkv,
     swap_to_swa,
     swap_to_msa,
@@ -195,6 +197,7 @@ def main():
     segment_size = cfg.model.segment_size
     m2t_mode = cfg.model.m2t_mode
     m2m_mode = cfg.model.m2m_mode
+    seg0_lora_bypass = getattr(cfg.model, 'seg0_lora_bypass', True)
     pad_token_id = cfg.tokenizer.pad_token_id
     train_memory_compression_projection = cfg.train.train_memory_compression_projection
     train_memory_qkv_projection = cfg.train.train_memory_qkv_projection
@@ -235,6 +238,19 @@ def main():
                 # Attach memory-token injector on the first PP stage.
                 if getattr(m, "embedding", None) is not None:
                     register_prepend_memory_token_injector(m, group_size=group_size)
+
+                # Install seg0 LoRA bypass hooks so that the first segment_size
+                # tokens receive no LoRA contribution, matching the base model.
+                if seg0_lora_bypass and cfg.peft is not None:
+                    # seg0_tokens = segment_size (the first segment constitutes seg0)
+                    seg0_tokens = segment_size
+                    handles = install_seg0_lora_bypass(m, seg0_tokens)
+                    # Store handles on the model so they can be cleaned up later if needed
+                    m._seg0_bypass_handles = handles
+                    logger.info(
+                        "[seg0_lora_bypass] Installed on MSA layers, seg0_tokens=%d",
+                        seg0_tokens,
+                    )
 
             # When LoRA (MemorySparseAttentionLoRA) is configured via cfg.peft,
             # freeze/unfreeze is handled by the PEFT __call__ flow that runs

@@ -20,6 +20,10 @@ model:
   segment_size: 1024
   m2t_mode: block_diag  # "block_diag" or "segment"
   m2m_mode: None      # "causal" or None
+  seg0_lora_bypass: true  # Zero LoRA contribution for first segment_size tokens in MSA layers
+  recompute_granularity: "full"
+  recompute_method: "uniform"
+  recompute_num_layers: 1
 
 ddp:
   overlap_grad_reduce: false

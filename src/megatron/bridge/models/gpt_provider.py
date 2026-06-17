@@ -186,6 +186,11 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
     m2m_mode: str = "causal"
     """Memory-to-memory attention mode: 'causal' or None."""
 
+    seg0_lora_bypass: bool = True
+    """When True, LoRA adapter contributions are zeroed for seg0 tokens (the first
+    ``segment_size`` positions in each sequence) in MSA layers, so those tokens
+    behave identically to the base pretrained model."""
+
     # MoE / FP8
     num_moe_experts: Optional[int] = None
     moe_grouped_gemm: bool = False

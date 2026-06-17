@@ -20,6 +20,12 @@ Used by the SparseAttention distillation training pipeline to:
 1. Build the *student* model B = swap_to_flashmask(model_A_copy)
 2. Capture core_attention outputs from every decoder layer of both teacher
    and student for KL-loss alignment.
+
+Also provides seg0 LoRA bypass: when MSA + LoRA are both active, the first
+``segment_size`` tokens in each sequence should not receive LoRA contributions,
+keeping them identical to the base pretrained model.  Hooks are installed on
+``LoRALLinear.adapter`` and ``LoRATopKRouter.adapter`` to zero the adapter
+output at seg0 positions.
 """
 
 from typing import Iterable, List
@@ -29,6 +35,10 @@ import torch
 import torch.nn as nn
 
 from megatron.bridge.models.qwen.memory_token import MemoryQkvProjection
+from megatron.bridge.models.qwen.seg0_lora_bypass import (
+    clear_seg0_bypass as _clear_seg0_bypass,
+    install_seg0_bypass_hooks as _install_seg0_bypass_hooks,
+)
 from megatron.bridge.models.qwen.sparse_attention import (
     FlashMaskAttention,
     MemorySparseAttention,
@@ -150,6 +160,50 @@ def swap_to_swa(
         ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
         self_attn.core_attention = new
     return model
+
+
+def install_seg0_lora_bypass(
+    model: nn.Module,
+    seg0_tokens: int,
+) -> List[torch.utils.hooks.RemovableHandle]:
+    """Install seg0 LoRA bypass hooks on every decoder layer.
+
+    For each layer whose ``self_attention.core_attention`` is a
+    :class:`MemorySparseAttention`, forward hooks are registered on the
+    ``LoRALinear.adapter`` and ``LoRATopKRouter.adapter`` sub-modules so
+    that adapter contributions at the first ``seg0_tokens`` positions are
+    zeroed.
+
+    Returns a list of handles that can be removed with
+    :func:`remove_seg0_lora_bypass`.
+    """
+    all_handles: List[torch.utils.hooks.RemovableHandle] = []
+    for layer in _iter_decoder_layers(model):
+        self_attn = getattr(layer, "self_attention", None)
+        if self_attn is None:
+            continue
+        core_attn = getattr(self_attn, "core_attention", None)
+        if not isinstance(core_attn, MemorySparseAttention):
+            continue
+        handles = _install_seg0_bypass_hooks(layer, seg0_tokens)
+        all_handles.extend(handles)
+    return all_handles
+
+
+def remove_seg0_lora_bypass(
+    model: nn.Module,
+    handles: List[torch.utils.hooks.RemovableHandle],
+) -> None:
+    """Remove seg0 LoRA bypass hooks and clean up cached state.
+
+    Args:
+        model: The model whose layers were bypass-enabled.
+        handles: The list of handles returned by :func:`install_seg0_lora_bypass`.
+    """
+    for h in handles:
+        h.remove()
+    for layer in _iter_decoder_layers(model):
+        _clear_seg0_bypass(layer)
 
 
 class AttnOutputCollector:
