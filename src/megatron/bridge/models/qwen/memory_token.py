@@ -63,7 +63,7 @@ class MemoryQkvProjection(nn.Module):
         self.group_size = group_size
         # Independent projection for memory-token QKV, same in/out dimensions.
         self.memory_proj = nn.Linear(qkv_out_dim, qkv_out_dim, bias=False)
-        nn.init.kaiming_normal_(self.memory_proj.weight)
+        nn.init.zeros_(self.memory_proj.weight)
 
     @property
     def config(self):
