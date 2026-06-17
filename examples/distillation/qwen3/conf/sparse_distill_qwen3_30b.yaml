@@ -18,6 +18,8 @@ model:
   seq_length: 8192
   group_size: 4
   segment_size: 1024
+  m2t_mode: block_diag  # "block_diag" or "segment"
+  m2m_mode: None      # "causal" or None
 
 ddp:
   overlap_grad_reduce: false

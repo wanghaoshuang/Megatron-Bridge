@@ -46,6 +46,8 @@ def _build_sparse_prepend_memory_pattern(
     group_size: int,
     segment_size: int,
     device: torch.device,
+    m2t_mode: str = "block_diag",  # "block_diag" or "segment" or None
+    m2m_mode: str = "causal",  # "causal" or None
 ) -> Tensor:
     """Build the sparse attention mask in *prepend-memory* layout.
 
@@ -101,12 +103,18 @@ def _build_sparse_prepend_memory_pattern(
     kj_m_for_tq = torch.arange(J, device=device).unsqueeze(0)  # [1, J]  (t row, m col)
 
     # ④ m -> m : causal  (ki < qi)
-    mask[:J, :J] = kj_m < qi_m
+    if m2m_mode == "causal":
+        mask[:J, :J] = kj_m < qi_m
 
-    # ③ m -> t : same segment & ki < (qi+1)*g
-    seg_m = (qi_m * g) // s       # segment of memory query
-    seg_t_col = ki_t_for_mq // s  # segment of token key
-    mask[:J, J:] = (seg_m == seg_t_col) & (ki_t_for_mq < (qi_m + 1) * g)
+    # ③ m -> t : 
+    if m2t_mode == "segment":
+        # same segment & ki < (qi+1)*g
+        seg_m = (qi_m * g) // s       # segment of memory query
+        seg_t_col = ki_t_for_mq // s  # segment of token key
+        mask[:J, J:] = (seg_m == seg_t_col) & (ki_t_for_mq < (qi_m + 1) * g)
+    elif m2t_mode == "block_diag":
+        # local window
+        mask[:J, J:] =  (ki_t_for_mq < (qi_m + 1) * g) & (ki_t_for_mq > qi_m * g - 1)
 
     # ② t -> m : (ki+1)*g <= qi - (s-1)
     mask[J:, :J] = (kj_m_for_tq + 1) * g <= qi_t - (s - 1)
@@ -239,6 +247,8 @@ class MemorySparseAttention(FlashMaskAttention):
         pg_collection=None,
         group_size: Optional[int] = None,
         segment_size: Optional[int] = None,
+        m2t_mode: str = "block_diag",
+        m2m_mode: str = "causal",
     ):
         super().__init__(
             config=config,
@@ -249,6 +259,8 @@ class MemorySparseAttention(FlashMaskAttention):
         )
         self.segment_size = segment_size
         self.group_size = group_size
+        self.m2t_mode = m2t_mode
+        self.m2m_mode = m2m_mode
 
     def build_flash_mask(
         self,
@@ -266,7 +278,10 @@ class MemorySparseAttention(FlashMaskAttention):
         # seq_len_q here is the *expanded* sequence length (including memory tokens).
         # _build_sparse_prepend_memory_pattern expects the *original* token count.
         original_seq_len = seq_len_q * self.group_size // (self.group_size + 1)
-        mask = _build_sparse_prepend_memory_pattern(original_seq_len, self.group_size, self.segment_size, device)
+        mask = _build_sparse_prepend_memory_pattern(
+            original_seq_len, self.group_size, self.segment_size, device,
+            m2t_mode=self.m2t_mode, m2m_mode=self.m2m_mode,
+        )
         return mask
     
 

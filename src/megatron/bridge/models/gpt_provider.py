@@ -181,6 +181,10 @@ class GPTModelProvider(TransformerConfig, ModelProviderMixin[MCoreGPTModel]):
     """Memory-token group size. 0 disables memory-token augmentation."""
     segment_size: int = 0
     """Sparse-mask segment size (in original tokens). Must be a multiple of group_size."""
+    m2t_mode: str = "block_diag"
+    """Memory-to-token attention mode: 'block_diag' or 'segment'."""
+    m2m_mode: str = "causal"
+    """Memory-to-memory attention mode: 'causal' or None."""
 
     # MoE / FP8
     num_moe_experts: Optional[int] = None

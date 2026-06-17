@@ -94,6 +94,8 @@ def swap_to_msa(
     *,
     group_size: Optional[int] = None,
     segment_size: Optional[int] = None,
+    m2t_mode: str = "block_diag",
+    m2m_mode: str = "causal",
 ) -> nn.Module:
     """Replace ``self_attention.core_attention`` of every decoder layer with
     :class:`MemorySparseAttention`.
@@ -115,6 +117,8 @@ def swap_to_msa(
             attn_mask_type=getattr(old, "attn_mask_type", None),
             group_size=group_size,
             segment_size=segment_size,
+            m2t_mode=m2t_mode,
+            m2m_mode=m2m_mode,
         ).to(device=next(self_attn.parameters()).device, dtype=next(self_attn.parameters()).dtype)
         self_attn.core_attention = new
     return model

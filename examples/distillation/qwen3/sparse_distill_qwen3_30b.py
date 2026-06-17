@@ -193,6 +193,8 @@ def main():
     attention_type = cfg.model.attention_type
     group_size = cfg.model.group_size
     segment_size = cfg.model.segment_size
+    m2t_mode = cfg.model.m2t_mode
+    m2m_mode = cfg.model.m2m_mode
     pad_token_id = cfg.tokenizer.pad_token_id
     train_memory_compression_projection = cfg.train.train_memory_compression_projection
     train_memory_qkv_projection = cfg.train.train_memory_qkv_projection
@@ -228,7 +230,7 @@ def main():
             if attention_type == "swa":
                 swap_to_swa(m, window_size=segment_size)
             elif attention_type == "msa":
-                swap_to_msa(m, group_size=group_size, segment_size=segment_size)
+                swap_to_msa(m, group_size=group_size, segment_size=segment_size, m2t_mode=m2t_mode, m2m_mode=m2m_mode)
                 swap_to_memory_qkv(m, group_size=group_size)
                 # Attach memory-token injector on the first PP stage.
                 if getattr(m, "embedding", None) is not None:
