@@ -37,6 +37,7 @@ import argparse
 import logging
 
 from megatron.bridge import AutoBridge
+from megatron_bridge_patch.peft import apply_all_peft_patches
 from megatron.bridge.models.qwen.qwen3_swap_attention import (
     AttnOutputCollector,
     install_seg0_lora_bypass,
@@ -162,6 +163,7 @@ def parse_args():
 
 
 def main():
+    apply_all_peft_patches()
     args, cli_overrides = parse_args()
 
     cfg: ConfigContainer = qwen3_30b_a3b_sft_config()
